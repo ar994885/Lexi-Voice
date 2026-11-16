@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/row_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginHorizontal="12dp"
+    android:layout_marginVertical="4dp"
+    android:background="@drawable/bg_export_chapter_item"
+    android:gravity="center_vertical"
+    android:minHeight="64dp"
+    android:orientation="horizontal"
+    android:paddingHorizontal="12dp"
+    android:paddingVertical="10dp">
+
+    <CheckBox
+        android:id="@+id/cb_chapter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:clickable="false"
+        android:focusable="false" />
+
+    <TextView
+        android:id="@+id/tv_chapter_number"
+        android:layout_width="40dp"
+        android:layout_height="28dp"
+        android:layout_marginStart="4dp"
+        android:background="@drawable/bg_chapter_badge"
+        android:gravity="center"
+        android:text="001"
+        android:textColor="#D97736"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tv_chapter_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:text="Chapter Title"
+            android:textColor="#181C24"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_chapter_meta"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="1,420 words • ~9 min"
+            android:textColor="#6B7280"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <ImageButton
+        android:id="@+id/btn_edit_chapter_name"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="Edit exported chapter title"
+        android:src="@android:drawable/ic_menu_edit"
+        android:tint="#5C6470" />
+
+</LinearLayout>

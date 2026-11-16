@@ -1,0 +1,6 @@
+{
+  "name": "LexiVoice",
+  "description": "EPUB reader, T2S text-to-speech player, local library folder watcher, and batch MP3/M4A audiobook exporter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
