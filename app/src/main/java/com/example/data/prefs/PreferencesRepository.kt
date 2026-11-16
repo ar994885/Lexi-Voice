@@ -39,6 +39,19 @@ data class SavedExportFolder(
     val lastUsedAt: Long
 )
 
+enum class FloatingAppearanceMode {
+    DEFAULT_THEME,
+    CUSTOM
+}
+
+data class FloatingOverlaySettings(
+    val masterEnabled: Boolean = true,
+    val appearanceMode: FloatingAppearanceMode = FloatingAppearanceMode.DEFAULT_THEME,
+    val backgroundColorArgb: Int = 0xE61E1E24.toInt(),
+    val borderColorArgb: Int = 0x33FFFFFF.toInt(),
+    val borderWidthDp: Int = 1
+)
+
 class PreferencesRepository(private val context: Context) {
 
     private object Keys {
@@ -58,6 +71,12 @@ class PreferencesRepository(private val context: Context) {
         val SAVED_EXPORT_FOLDERS = stringPreferencesKey("saved_export_folders_json")
         val PASTE_SCRATCHPAD_TEXT = stringPreferencesKey("paste_scratchpad_text")
         val PASTE_SCRATCHPAD_TITLE = stringPreferencesKey("paste_scratchpad_title")
+
+        val OVERLAY_MASTER_ENABLED = booleanPreferencesKey("overlay_master_enabled")
+        val OVERLAY_APPEARANCE_MODE = stringPreferencesKey("overlay_appearance_mode")
+        val OVERLAY_BG_ARGB = intPreferencesKey("overlay_bg_argb")
+        val OVERLAY_BORDER_ARGB = intPreferencesKey("overlay_border_argb")
+        val OVERLAY_BORDER_WIDTH_DP = intPreferencesKey("overlay_border_width_dp")
     }
 
     val readerSettings: Flow<ReaderSettings> = context.dataStore.data.map { prefs ->
@@ -90,6 +109,19 @@ class PreferencesRepository(private val context: Context) {
 
     val scratchpadText: Flow<String> = context.dataStore.data.map { it[Keys.PASTE_SCRATCHPAD_TEXT] ?: "" }
     val scratchpadTitle: Flow<String> = context.dataStore.data.map { it[Keys.PASTE_SCRATCHPAD_TITLE] ?: "Quick Read" }
+
+    val floatingOverlaySettings: Flow<FloatingOverlaySettings> = context.dataStore.data.map { prefs ->
+        val mode = runCatching {
+            FloatingAppearanceMode.valueOf(prefs[Keys.OVERLAY_APPEARANCE_MODE] ?: FloatingAppearanceMode.DEFAULT_THEME.name)
+        }.getOrDefault(FloatingAppearanceMode.DEFAULT_THEME)
+        FloatingOverlaySettings(
+            masterEnabled = prefs[Keys.OVERLAY_MASTER_ENABLED] ?: true,
+            appearanceMode = mode,
+            backgroundColorArgb = prefs[Keys.OVERLAY_BG_ARGB] ?: 0xE61E1E24.toInt(),
+            borderColorArgb = prefs[Keys.OVERLAY_BORDER_ARGB] ?: 0x33FFFFFF.toInt(),
+            borderWidthDp = (prefs[Keys.OVERLAY_BORDER_WIDTH_DP] ?: 1).coerceIn(0, 2)
+        )
+    }
 
     suspend fun updateReaderSettings(transform: (ReaderSettings) -> ReaderSettings) {
         context.dataStore.edit { prefs ->
@@ -138,6 +170,27 @@ class PreferencesRepository(private val context: Context) {
         context.dataStore.edit {
             it[Keys.PASTE_SCRATCHPAD_TITLE] = title
             it[Keys.PASTE_SCRATCHPAD_TEXT] = text
+        }
+    }
+
+    suspend fun updateFloatingOverlaySettings(transform: (FloatingOverlaySettings) -> FloatingOverlaySettings) {
+        context.dataStore.edit { prefs ->
+            val currentMode = runCatching {
+                FloatingAppearanceMode.valueOf(prefs[Keys.OVERLAY_APPEARANCE_MODE] ?: FloatingAppearanceMode.DEFAULT_THEME.name)
+            }.getOrDefault(FloatingAppearanceMode.DEFAULT_THEME)
+            val current = FloatingOverlaySettings(
+                masterEnabled = prefs[Keys.OVERLAY_MASTER_ENABLED] ?: true,
+                appearanceMode = currentMode,
+                backgroundColorArgb = prefs[Keys.OVERLAY_BG_ARGB] ?: 0xE61E1E24.toInt(),
+                borderColorArgb = prefs[Keys.OVERLAY_BORDER_ARGB] ?: 0x33FFFFFF.toInt(),
+                borderWidthDp = (prefs[Keys.OVERLAY_BORDER_WIDTH_DP] ?: 1).coerceIn(0, 2)
+            )
+            val updated = transform(current)
+            prefs[Keys.OVERLAY_MASTER_ENABLED] = updated.masterEnabled
+            prefs[Keys.OVERLAY_APPEARANCE_MODE] = updated.appearanceMode.name
+            prefs[Keys.OVERLAY_BG_ARGB] = updated.backgroundColorArgb
+            prefs[Keys.OVERLAY_BORDER_ARGB] = updated.borderColorArgb
+            prefs[Keys.OVERLAY_BORDER_WIDTH_DP] = updated.borderWidthDp.coerceIn(0, 2)
         }
     }
 

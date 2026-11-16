@@ -95,6 +95,16 @@ object Mp3AudioEncoder {
         }
     }
 
+    fun computeWavDurationMs(wavFile: File): Long {
+        if (!wavFile.exists() || wavFile.length() < 44L) return 0L
+        return runCatching {
+            val bytes = FileInputStream(wavFile).use { it.readBytes() }
+            val h = parseWavHeader(bytes) ?: return@runCatching 0L
+            val bytesPerSec = h.sampleRate.toLong() * h.channels.coerceAtLeast(1) * (h.bitsPerSample / 8).coerceAtLeast(1)
+            if (bytesPerSec <= 0L) 0L else (h.dataSize.toLong() * 1000L) / bytesPerSec
+        }.getOrDefault(0L)
+    }
+
     fun parseWavHeader(bytes: ByteArray): WavHeader? {
         if (bytes.size < 44) return null
         if (String(bytes, 0, 4) != "RIFF" || String(bytes, 8, 4) != "WAVE") return null

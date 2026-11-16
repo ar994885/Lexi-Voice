@@ -292,7 +292,6 @@ object EpubParser {
                         val span = Element("span")
                             .addClass("lexi-s")
                             .attr("data-idx", sIdx.toString())
-                            .attr("onclick", "if(window.LexiBridge){window.LexiBridge.onSentenceTapped($sIdx);}")
                             .text(chunk)
                         replacementNodes.add(span)
                     }
@@ -320,7 +319,7 @@ object EpubParser {
             }
         }
 
-        // Inject JS helper for highlighting and auto-scrolling cleanly inside WebView
+        // Inject JS helper for highlighting, delegated sentence tap, and selection detection
         body.appendChild(
             Element("script").appendChild(
                 DataNode(
@@ -340,6 +339,29 @@ object EpubParser {
                           }
                         }
                       };
+                      document.addEventListener('click', function(ev) {
+                        try {
+                          var selText = window.getSelection ? window.getSelection().toString().trim() : '';
+                          if (selText.length > 0) return;
+                          var el = ev.target && ev.target.closest ? ev.target.closest('.lexi-s') : null;
+                          if (el && window.LexiBridge && window.LexiBridge.onSentenceTapped) {
+                            var idx = parseInt(el.getAttribute('data-idx'), 10);
+                            if (!isNaN(idx)) window.LexiBridge.onSentenceTapped(idx);
+                          }
+                        } catch (e) {}
+                      });
+                      var lexiSelTimer = null;
+                      document.addEventListener('selectionchange', function() {
+                        if (lexiSelTimer) clearTimeout(lexiSelTimer);
+                        lexiSelTimer = setTimeout(function() {
+                          try {
+                            var sel = window.getSelection ? window.getSelection().toString().trim() : '';
+                            if (window.LexiBridge && window.LexiBridge.onTextSelected) {
+                              window.LexiBridge.onTextSelected(sel);
+                            }
+                          } catch (e) {}
+                        }, 180);
+                      });
                     })();
                     """.trimIndent()
                 )
@@ -366,6 +388,7 @@ object EpubParser {
         val relPath = decodeHref(requestUrl.removePrefix(ASSET_BASE_URL).substringBefore('?').substringBefore('#'))
         val normalized = normalizePath(relPath)
         val entry = getZipEntryIgnoreCase(zip, normalized) ?: return null
+        if (entry.size > 16L * 1024L * 1024L) return null
         val bytes = zip.getInputStream(entry).use { it.readBytes() }
         return ZipResourceData(bytes = bytes, mimeType = guessMimeType(normalized))
     }

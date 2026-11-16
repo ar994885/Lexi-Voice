@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
@@ -43,12 +44,15 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
@@ -86,12 +90,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.LexiVoiceApplication
+import com.example.export.ExportStateHolder
+import com.example.overlay.FloatingOverlayController
+import com.example.overlay.FloatingOverlayState
+import com.example.overlay.OverlayStyleHelper
+import com.example.overlay.UnifiedOverlaySource
 import com.example.tts.SleepTimerMode
 import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsPlaybackState
 import com.example.tts.TtsSourceType
-import com.example.tts.TtsStateHolder
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -228,8 +237,11 @@ fun TtsControlsModalSheet(
     var showEngineDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var showVoiceDialog by remember { mutableStateOf(false) }
+    var showExportTtsConflictDialog by remember { mutableStateOf(false) }
     var customMinutesInput by remember { mutableStateOf("20") }
-    val canDrawOverlay = remember(ttsState.floatingPopupVisible) {
+    val overlayState by FloatingOverlayController.state.collectAsStateWithLifecycle()
+    val exportProgress by ExportStateHolder.state.collectAsStateWithLifecycle()
+    val canDrawOverlay = remember(overlayState.isVisible) {
         Settings.canDrawOverlays(context)
     }
 
@@ -265,6 +277,34 @@ fun TtsControlsModalSheet(
                 text = "Speech Engine & Playback Controls",
                 style = MaterialTheme.typography.titleLarge
             )
+            if (exportProgress.isRunning) {
+                Spacer(Modifier.height(10.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("tts_sheet_export_warning_card")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.WarningAmber,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "Audio export running (${exportProgress.batchProgressPercent}%) — avoid playing TTS so both don't collide on the speech engine.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
             Spacer(Modifier.height(14.dp))
 
             // Transport row
@@ -280,7 +320,13 @@ fun TtsControlsModalSheet(
                     Icon(Icons.Default.FastRewind, contentDescription = "Back Sentence")
                 }
                 FilledIconButton(
-                    onClick = { TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE) },
+                    onClick = {
+                        if (exportProgress.isRunning && !ttsState.isPlaying) {
+                            showExportTtsConflictDialog = true
+                        } else {
+                            TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
+                        }
+                    },
                     modifier = Modifier.size(56.dp)
                 ) {
                     Icon(
@@ -511,9 +557,7 @@ fun TtsControlsModalSheet(
             ) {
                 Button(
                     onClick = {
-                        TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_SET_FLOATING_POPUP) {
-                            putExtra(TtsPlaybackService.EXTRA_BOOL, !ttsState.floatingPopupVisible)
-                        }
+                        FloatingOverlayController.setVisible(context, !overlayState.isVisible)
                     },
                     modifier = Modifier
                         .weight(1f)
@@ -521,7 +565,7 @@ fun TtsControlsModalSheet(
                 ) {
                     Icon(Icons.Default.PictureInPictureAlt, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    Text(if (ttsState.floatingPopupVisible) "Hide Floating Bar" else "Show Floating Bar")
+                    Text(if (overlayState.isVisible) "Hide Floating Bar" else "Show Floating Bar")
                 }
 
                 if (!canDrawOverlay) {
@@ -659,49 +703,104 @@ fun TtsControlsModalSheet(
             }
         )
     }
+
+    if (showExportTtsConflictDialog) {
+        AlertDialog(
+            onDismissRequest = { showExportTtsConflictDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.WarningAmber,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Audio Export in Progress") },
+            text = {
+                Text(
+                    "Background audio export and live TTS playback share the Android TextToSpeech engine. " +
+                        "Starting TTS now may degrade exported audio quality or skip sentences."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showExportTtsConflictDialog = false }) {
+                    Text("Wait for Export")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showExportTtsConflictDialog = false
+                        TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
+                    }
+                ) {
+                    Text("Play Anyway")
+                }
+            }
+        )
+    }
 }
 
 /**
  * Compact T2S-style in-app floating overlay fallback when SYSTEM_ALERT_WINDOW is not granted:
- * ~260dp wide, 8dp rounded corners, semi-transparent dark #E61E1E24, 6dp padding,
- * 2-line sentence preview (12sp) + edge-dock minimize + close, and 36dp vector icon buttons.
+ * Universal across live TTS and Audiobook playback, supports custom background/border colors,
+ * draggable 48dp circular Bubble Minimize mode, clickable 2-line sentence preview (12sp)
+ * that jumps to Reader or Synced Audiobook Read-Along, Minimize + Close, and 36dp controls.
  */
 @Composable
 fun InAppFloatingTtsPopup(
-    ttsState: TtsPlaybackState,
+    overlayState: FloatingOverlayState,
+    onTapSentence: (FloatingOverlayState) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    if (!ttsState.floatingPopupVisible) return
+    if (!overlayState.isVisible) return
     val context = LocalContext.current
     if (Settings.canDrawOverlays(context)) return
 
+    val resolvedColors = remember(overlayState.appearanceSettings) {
+        OverlayStyleHelper.resolveColors(overlayState.appearanceSettings)
+    }
+    val bgColor = Color(resolvedColors.backgroundArgb)
+    val borderStroke = if (resolvedColors.borderWidthDp > 0) {
+        BorderStroke(resolvedColors.borderWidthDp.dp, Color(resolvedColors.borderArgb))
+    } else null
+    val primaryTextColor = Color(resolvedColors.primaryTextArgb)
+    val secondaryIconColor = Color(resolvedColors.secondaryIconArgb)
+
     var offsetX by remember { mutableFloatStateOf(24f) }
     var offsetY by remember { mutableFloatStateOf(140f) }
+    var bubbleOffsetX by remember { mutableFloatStateOf(24f) }
+    var bubbleOffsetY by remember { mutableFloatStateOf(220f) }
 
-    if (ttsState.floatingPopupTemporarilyHidden) {
+    if (overlayState.isTemporarilyHidden) {
         Box(
             modifier = modifier
-                .fillMaxWidth()
-                .padding(top = 180.dp),
-            contentAlignment = Alignment.CenterEnd
+                .offset { IntOffset(bubbleOffsetX.roundToInt(), bubbleOffsetY.roundToInt()) }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        bubbleOffsetX += dragAmount.x
+                        bubbleOffsetY += dragAmount.y
+                    }
+                }
         ) {
             Surface(
-                color = Color(0xE61E1E24),
-                shape = RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp),
-                shadowElevation = 6.dp,
+                color = bgColor,
+                shape = CircleShape,
+                border = borderStroke,
+                shadowElevation = 8.dp,
                 modifier = Modifier
-                    .size(width = 32.dp, height = 48.dp)
+                    .size(48.dp)
                     .clickable {
-                        TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = false) }
+                        FloatingOverlayController.setTemporarilyHidden(false)
                     }
                     .testTag("floating_popup_restore_tab")
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Rounded.PlayArrow,
-                        contentDescription = "Restore floating TTS bar",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        imageVector = if (overlayState.isPlaying) Icons.Default.GraphicEq else Icons.Rounded.PlayArrow,
+                        contentDescription = "Expand floating playback bubble",
+                        tint = primaryTextColor,
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -720,8 +819,8 @@ fun InAppFloatingTtsPopup(
         ) {
             Surface(
                 shape = RoundedCornerShape(8.dp),
-                color = Color(0xE61E1E24),
-                border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                color = bgColor,
+                border = borderStroke,
                 shadowElevation = 8.dp,
                 modifier = Modifier
                     .width(260.dp)
@@ -732,22 +831,26 @@ fun InAppFloatingTtsPopup(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val canJump = overlayState.activeSource != UnifiedOverlaySource.NONE
                         Text(
-                            text = ttsState.currentSentenceText.ifBlank {
-                                ttsState.currentParagraphText.ifBlank { "Tap Play to speak" }
-                            },
-                            color = Color(0xFFF5F5F7),
+                            text = overlayState.displayText,
+                            color = primaryTextColor,
                             fontSize = 12.sp,
                             lineHeight = 15.sp,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(horizontal = 4.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable(enabled = canJump) {
+                                    onTapSentence(overlayState)
+                                }
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .testTag("floating_popup_sentence_text")
                         )
                         IconButton(
                             onClick = {
-                                TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = true) }
+                                FloatingOverlayController.setTemporarilyHidden(true)
                             },
                             modifier = Modifier
                                 .size(28.dp)
@@ -755,16 +858,14 @@ fun InAppFloatingTtsPopup(
                         ) {
                             Icon(
                                 Icons.Default.Remove,
-                                contentDescription = "Dock to screen edge",
-                                tint = Color(0xFFB8BCC8),
+                                contentDescription = "Minimize to floating bubble",
+                                tint = secondaryIconColor,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
                         IconButton(
                             onClick = {
-                                TtsStateHolder.updateState {
-                                    it.copy(floatingPopupVisible = false, floatingPopupTemporarilyHidden = false)
-                                }
+                                FloatingOverlayController.setVisible(context, false)
                             },
                             modifier = Modifier
                                 .size(28.dp)
@@ -773,7 +874,7 @@ fun InAppFloatingTtsPopup(
                             Icon(
                                 Icons.Default.Close,
                                 contentDescription = "Close overlay",
-                                tint = Color(0xFFB8BCC8),
+                                tint = secondaryIconColor,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -787,15 +888,15 @@ fun InAppFloatingTtsPopup(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
-                            onClick = { TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_PREV_SENTENCE) },
+                            onClick = { FloatingOverlayController.skipPrevious(context) },
                             modifier = Modifier
                                 .size(36.dp)
                                 .testTag("floating_popup_back_button")
                         ) {
                             Icon(
                                 Icons.Rounded.SkipPrevious,
-                                contentDescription = "Previous sentence",
-                                tint = Color.White,
+                                contentDescription = "Previous",
+                                tint = primaryTextColor,
                                 modifier = Modifier.size(22.dp)
                             )
                         }
@@ -807,28 +908,28 @@ fun InAppFloatingTtsPopup(
                                 .clip(CircleShape)
                                 .background(Color(0xFFD97736))
                                 .clickable {
-                                    TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
+                                    FloatingOverlayController.togglePlayPause(context)
                                 }
                                 .testTag("floating_popup_play_button")
                         ) {
                             Icon(
-                                imageVector = if (ttsState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                contentDescription = if (ttsState.isPlaying) "Pause" else "Play",
+                                imageVector = if (overlayState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                contentDescription = if (overlayState.isPlaying) "Pause" else "Play",
                                 tint = Color.White,
                                 modifier = Modifier.size(22.dp)
                             )
                         }
                         Spacer(Modifier.width(16.dp))
                         IconButton(
-                            onClick = { TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_NEXT_SENTENCE) },
+                            onClick = { FloatingOverlayController.skipNext(context) },
                             modifier = Modifier
                                 .size(36.dp)
                                 .testTag("floating_popup_front_button")
                         ) {
                             Icon(
                                 Icons.Rounded.SkipNext,
-                                contentDescription = "Next sentence",
-                                tint = Color.White,
+                                contentDescription = "Next",
+                                tint = primaryTextColor,
                                 modifier = Modifier.size(22.dp)
                             )
                         }

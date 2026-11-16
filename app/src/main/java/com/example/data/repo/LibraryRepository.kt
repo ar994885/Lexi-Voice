@@ -48,6 +48,8 @@ class LibraryRepository(
 
     suspend fun getBookById(bookId: Long): BookEntity? = bookDao.getBookById(bookId)
 
+    suspend fun getBookByFileKey(fileKey: String): BookEntity? = bookDao.getBookByFileKey(fileKey)
+
     suspend fun addSafFolderAndScan(treeUri: Uri): WatchedFolderEntity = withContext(Dispatchers.IO) {
         val doc = DocumentFile.fromTreeUri(context, treeUri)
         val displayName = doc?.name ?: treeUri.lastPathSegment ?: "Book Folder"
@@ -113,7 +115,8 @@ class LibraryRepository(
         chapterIndex: Int,
         sentenceIndex: Int,
         scrollOffset: Int,
-        totalChapters: Int
+        totalChapters: Int,
+        syncedAt: Long = System.currentTimeMillis()
     ) = withContext(Dispatchers.IO) {
         val safeTotal = totalChapters.coerceAtLeast(1)
         val pct = ((chapterIndex + 1).toFloat() / safeTotal.toFloat()).coerceIn(0f, 1f)
@@ -123,7 +126,7 @@ class LibraryRepository(
             sentenceIndex = sentenceIndex,
             scrollOffset = scrollOffset,
             progressPercent = pct,
-            lastOpenedAt = System.currentTimeMillis()
+            lastOpenedAt = syncedAt
         )
     }
 

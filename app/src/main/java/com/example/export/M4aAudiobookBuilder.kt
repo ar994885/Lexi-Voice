@@ -1,10 +1,12 @@
 package com.example.export
 
+import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.net.Uri
 import com.example.audiobook.AudiobookChapterMeta
 import com.example.audiobook.SyncAlignmentSegment
 import java.io.ByteArrayOutputStream
@@ -44,6 +46,20 @@ data class M4bBuildResult(
     val totalDurationMs: Long,
     val chapterMetas: List<AudiobookChapterMeta>,
     val syncSegments: List<SyncAlignmentSegment>
+)
+
+data class Mp3UriChapterInput(
+    val chapterIndex: Int,
+    val chapterTitle: String,
+    val uriString: String,
+    val isDirectPath: Boolean
+)
+
+data class M4bFromMp3Result(
+    val success: Boolean,
+    val totalDurationMs: Long,
+    val chapterMetas: List<AudiobookChapterMeta>,
+    val compiledOffsets: List<Pair<Int, Long>>
 )
 
 object M4aAudiobookBuilder {
@@ -368,6 +384,174 @@ object M4aAudiobookBuilder {
         }
     }
 
+    fun buildChapteredM4bFromMp3Inputs(
+        context: Context,
+        chapters: List<Mp3UriChapterInput>,
+        outputM4bFile: File,
+        metadata: M4aMetadataConfig,
+        coverBytes: ByteArray?,
+        onProgress: (percent: Int) -> Unit
+    ): M4bFromMp3Result {
+        if (chapters.isEmpty()) return M4bFromMp3Result(false, 0L, emptyList(), emptyList())
+        val rawMuxedFile = File(outputM4bFile.parentFile, "${outputM4bFile.nameWithoutExtension}_raw.m4b")
+        if (rawMuxedFile.exists()) rawMuxedFile.delete()
+
+        return try {
+            val targetSampleRate = 22050
+            val targetChannels = 1
+            val bitRate = 64_000
+
+            val encoderFormat = MediaFormat.createAudioFormat(
+                MediaFormat.MIMETYPE_AUDIO_AAC,
+                targetSampleRate,
+                targetChannels
+            ).apply {
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 64 * 1024)
+            }
+
+            val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoder.start()
+
+            val muxer = MediaMuxer(rawMuxedFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            var trackIndex = -1
+            var muxerStarted = false
+            val bufferInfo = MediaCodec.BufferInfo()
+
+            var totalSamplesWritten = 0L
+            val chapterTimings = mutableListOf<ChapterTiming>()
+            val chapterMetas = mutableListOf<AudiobookChapterMeta>()
+            val compiledOffsets = mutableListOf<Pair<Int, Long>>()
+
+            fun drainEncoder(endOfStream: Boolean) {
+                if (endOfStream) {
+                    val idx = encoder.dequeueInputBuffer(10_000)
+                    if (idx >= 0) {
+                        encoder.queueInputBuffer(
+                            idx,
+                            0,
+                            0,
+                            (totalSamplesWritten * 1_000_000L) / targetSampleRate,
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        )
+                    }
+                }
+                while (true) {
+                    val outIdx = encoder.dequeueOutputBuffer(bufferInfo, 10_000)
+                    when {
+                        outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                            if (!endOfStream) break
+                        }
+                        outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                            if (!muxerStarted) {
+                                trackIndex = muxer.addTrack(encoder.outputFormat)
+                                muxer.start()
+                                muxerStarted = true
+                            }
+                        }
+                        outIdx >= 0 -> {
+                            val outBuf = encoder.getOutputBuffer(outIdx)
+                            if (outBuf != null && bufferInfo.size > 0 &&
+                                (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 &&
+                                muxerStarted
+                            ) {
+                                outBuf.position(bufferInfo.offset)
+                                outBuf.limit(bufferInfo.offset + bufferInfo.size)
+                                muxer.writeSampleData(trackIndex, outBuf, bufferInfo)
+                            }
+                            encoder.releaseOutputBuffer(outIdx, false)
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+                        }
+                    }
+                }
+            }
+
+            fun feedPcmShorts(samples: ShortArray, count: Int) {
+                var offset = 0
+                while (offset < count) {
+                    val inIdx = encoder.dequeueInputBuffer(10_000)
+                    if (inIdx >= 0) {
+                        val inBuf = encoder.getInputBuffer(inIdx) ?: continue
+                        inBuf.clear()
+                        val maxShorts = (inBuf.remaining() / 2).coerceAtMost(count - offset)
+                        inBuf.order(ByteOrder.LITTLE_ENDIAN)
+                        for (i in 0 until maxShorts) {
+                            inBuf.putShort(samples[offset + i])
+                        }
+                        val ptsUs = (totalSamplesWritten * 1_000_000L) / targetSampleRate
+                        encoder.queueInputBuffer(inIdx, 0, maxShorts * 2, ptsUs, 0)
+                        totalSamplesWritten += maxShorts
+                        offset += maxShorts
+                    }
+                    drainEncoder(false)
+                }
+            }
+
+            chapters.forEachIndexed { ordinalIdx, chapter ->
+                val startMs = (totalSamplesWritten * 1000L) / targetSampleRate
+                compiledOffsets.add(chapter.chapterIndex to startMs)
+
+                decodeAudioSourceToPcm(
+                    configureExtractor = { extractor ->
+                        if (chapter.isDirectPath) {
+                            extractor.setDataSource(chapter.uriString)
+                        } else {
+                            extractor.setDataSource(context, Uri.parse(chapter.uriString), null)
+                        }
+                    },
+                    targetSampleRate = targetSampleRate,
+                    targetChannels = targetChannels
+                ) { pcmChunk, count ->
+                    feedPcmShorts(pcmChunk, count)
+                }
+
+                val endMs = (totalSamplesWritten * 1000L) / targetSampleRate
+                chapterTimings.add(
+                    ChapterTiming(
+                        title = chapter.chapterTitle,
+                        startTimeMs = startMs,
+                        endTimeMs = endMs.coerceAtLeast(startMs + 100L)
+                    )
+                )
+                chapterMetas.add(
+                    AudiobookChapterMeta(
+                        index = ordinalIdx,
+                        title = chapter.chapterTitle,
+                        startMs = startMs,
+                        endMs = endMs.coerceAtLeast(startMs + 100L)
+                    )
+                )
+                onProgress((((ordinalIdx + 1).toFloat() / chapters.size.toFloat()) * 85f).toInt())
+            }
+
+            drainEncoder(true)
+            encoder.stop()
+            encoder.release()
+            if (muxerStarted) muxer.stop()
+            muxer.release()
+
+            val totalDurationMs = (totalSamplesWritten * 1000L) / targetSampleRate
+            onProgress(92)
+            Mp4ChapterAndMetadataWriter.injectChaptersAndMetadata(
+                inputFile = rawMuxedFile,
+                outputFile = outputM4bFile,
+                chapters = chapterTimings,
+                metadata = metadata,
+                coverBytes = if (metadata.includeCover) coverBytes else null,
+                useM4bBrand = true
+            )
+            rawMuxedFile.delete()
+            onProgress(100)
+            val ok = outputM4bFile.exists() && outputM4bFile.length() > 0L
+            M4bFromMp3Result(ok, totalDurationMs, chapterMetas, compiledOffsets)
+        } catch (_: Exception) {
+            rawMuxedFile.delete()
+            M4bFromMp3Result(false, 0L, emptyList(), emptyList())
+        }
+    }
+
     private fun readWavAndResample(
         wavFile: File,
         targetSampleRate: Int,
@@ -418,8 +602,22 @@ object M4aAudiobookBuilder {
         targetChannels: Int,
         onPcmChunk: (ShortArray, Int) -> Unit
     ) {
+        decodeAudioSourceToPcm(
+            configureExtractor = { it.setDataSource(mp3File.absolutePath) },
+            targetSampleRate = targetSampleRate,
+            targetChannels = targetChannels,
+            onPcmChunk = onPcmChunk
+        )
+    }
+
+    private fun decodeAudioSourceToPcm(
+        configureExtractor: (MediaExtractor) -> Unit,
+        targetSampleRate: Int,
+        targetChannels: Int,
+        onPcmChunk: (ShortArray, Int) -> Unit
+    ) {
         val extractor = MediaExtractor()
-        extractor.setDataSource(mp3File.absolutePath)
+        configureExtractor(extractor)
         var audioTrackIdx = -1
         var trackFormat: MediaFormat? = null
         for (i in 0 until extractor.trackCount) {

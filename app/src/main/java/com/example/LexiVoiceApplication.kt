@@ -10,7 +10,9 @@ import com.example.data.db.LexiDatabase
 import com.example.data.prefs.PreferencesRepository
 import com.example.data.repo.AudiobookRepository
 import com.example.data.repo.LibraryRepository
+import com.example.data.repo.PronunciationRepository
 import com.example.library.FolderSyncWorker
+import com.example.overlay.FloatingOverlayController
 
 class LexiVoiceApplication : Application(), Configuration.Provider {
 
@@ -27,8 +29,12 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
         AudiobookRepository(
             context = this,
             audiobookDao = database.audiobookDao(),
-            folderDao = database.folderDao()
+            folderDao = database.folderDao(),
+            preferencesRepository = preferencesRepository
         )
+    }
+    val pronunciationRepository: PronunciationRepository by lazy {
+        PronunciationRepository(database.pronunciationRuleDao())
     }
 
     override val workManagerConfiguration: Configuration
@@ -39,6 +45,7 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
+        FloatingOverlayController.attachPreferences(preferencesRepository)
         runCatching {
             FolderSyncWorker.schedulePeriodic(this)
         }

@@ -4,6 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.LexiVoiceApplication
+import com.example.audiobook.M4bPlaybackService
+import com.example.audiobook.SyncAlignmentSerializer
+import com.example.data.db.AudiobookEntity
 import com.example.data.db.BookEntity
 import com.example.data.prefs.ReaderSettings
 import com.example.epub.EpubChapterSummary
@@ -20,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class ReaderUiState(
     val isLoading: Boolean = true,
@@ -27,6 +31,7 @@ data class ReaderUiState(
     val chapters: List<EpubChapterSummary> = emptyList(),
     val currentChapterIndex: Int = 0,
     val webChapterPayload: EpubParser.WebChapterPayload? = null,
+    val jumpHighlightSentenceIndex: Int = -1,
     val errorMessage: String? = null
 )
 
@@ -40,6 +45,47 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     val readerSettings: StateFlow<ReaderSettings> = prefsRepo.readerSettings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReaderSettings())
+
+    private var pendingJumpBookId: Long = -1L
+    private var pendingJumpChapter: Int = -1
+    private var pendingJumpSentence: Int = -1
+
+    fun requestJumpToLocation(bookId: Long, chapterIndex: Int, sentenceIndex: Int) {
+        val current = _uiState.value
+        if (current.book?.id == bookId && !current.isLoading && current.chapters.isNotEmpty()) {
+            val targetCh = chapterIndex.coerceIn(0, current.chapters.lastIndex)
+            val safeSent = sentenceIndex.coerceAtLeast(0)
+            if (targetCh == current.currentChapterIndex) {
+                _uiState.value = current.copy(jumpHighlightSentenceIndex = safeSent)
+            } else {
+                viewModelScope.launch {
+                    val summary = current.chapters[targetCh]
+                    val payload = withContext(Dispatchers.IO) {
+                        EpubParser.loadChapterForWebView(
+                            context = app,
+                            fileKey = current.book.fileKey,
+                            isDirectPath = current.book.isDirectPath,
+                            chapterIndex = targetCh,
+                            chapterHref = summary.href,
+                            chapterTitle = summary.title
+                        )
+                    }
+                    _uiState.value = _uiState.value.copy(
+                        currentChapterIndex = targetCh,
+                        webChapterPayload = payload,
+                        jumpHighlightSentenceIndex = safeSent
+                    )
+                    if (!TtsStateHolder.state.value.isPlaying || TtsStateHolder.state.value.bookId == current.book.id) {
+                        pushSessionToTts(current.book, current.chapters, targetCh, payload)
+                    }
+                }
+            }
+        } else {
+            pendingJumpBookId = bookId
+            pendingJumpChapter = chapterIndex
+            pendingJumpSentence = sentenceIndex
+        }
+    }
 
     fun openBook(bookId: Long) {
         viewModelScope.launch {
@@ -69,7 +115,25 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 return@launch
             }
 
-            val targetChapterIdx = book.currentChapterIndex.coerceIn(0, chapters.lastIndex)
+            val hasPendingJump = pendingJumpBookId == bookId && pendingJumpChapter >= 0
+            val targetChapterIdx = if (hasPendingJump) {
+                pendingJumpChapter.coerceIn(0, chapters.lastIndex)
+            } else {
+                book.currentChapterIndex.coerceIn(0, chapters.lastIndex)
+            }
+            val jumpSentence = if (hasPendingJump) {
+                pendingJumpSentence.coerceAtLeast(0)
+            } else if (book.currentSentenceIndex > 0) {
+                book.currentSentenceIndex
+            } else {
+                -1
+            }
+            if (hasPendingJump) {
+                pendingJumpBookId = -1L
+                pendingJumpChapter = -1
+                pendingJumpSentence = -1
+            }
+
             val payload = withContext(Dispatchers.IO) {
                 EpubParser.loadChapterForWebView(
                     context = app,
@@ -86,13 +150,14 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 book = book,
                 chapters = chapters,
                 currentChapterIndex = targetChapterIdx,
-                webChapterPayload = payload
+                webChapterPayload = payload,
+                jumpHighlightSentenceIndex = jumpSentence
             )
 
             libraryRepo.updateReadingProgress(
                 bookId = book.id,
                 chapterIndex = targetChapterIdx,
-                sentenceIndex = book.currentSentenceIndex,
+                sentenceIndex = if (jumpSentence >= 0) jumpSentence else book.currentSentenceIndex,
                 scrollOffset = book.scrollOffset,
                 totalChapters = chapters.size
             )
@@ -127,7 +192,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             }
             _uiState.value = current.copy(
                 currentChapterIndex = chapterIndex,
-                webChapterPayload = payload
+                webChapterPayload = payload,
+                jumpHighlightSentenceIndex = -1
             )
             libraryRepo.updateReadingProgress(
                 bookId = book.id,
@@ -172,6 +238,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         val current = _uiState.value
         val book = current.book ?: return
         val payload = current.webChapterPayload ?: return
+        _uiState.value = current.copy(jumpHighlightSentenceIndex = -1)
         pushSessionToTts(book, current.chapters, current.currentChapterIndex, payload)
         TtsPlaybackService.sendAction(app, TtsPlaybackService.ACTION_PLAY_BOOK) {
             putExtra(TtsPlaybackService.EXTRA_SENTENCE_INDEX, sentenceIndex)
@@ -197,6 +264,61 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     fun updateReaderSettings(transform: (ReaderSettings) -> ReaderSettings) {
         viewModelScope.launch {
             prefsRepo.updateReaderSettings(transform)
+        }
+    }
+
+    fun syncCurrentProgressToAudiobook(audiobook: AudiobookEntity, onReady: (Long) -> Unit) {
+        val current = _uiState.value
+        val curChapter = current.currentChapterIndex
+        val ttsState = TtsStateHolder.state.value
+        val curSentence = if (ttsState.isActive && ttsState.bookId == current.book?.id && ttsState.chapterIndex == curChapter) {
+            ttsState.sentenceIndex
+        } else {
+            current.jumpHighlightSentenceIndex.takeIf { it >= 0 }
+                ?: current.book?.currentSentenceIndex
+                ?: 0
+        }.coerceAtLeast(0)
+
+        if (ttsState.isPlaying) {
+            TtsPlaybackService.sendAction(app, TtsPlaybackService.ACTION_PAUSE)
+        }
+
+        viewModelScope.launch {
+            val targetMs = withContext(Dispatchers.IO) {
+                val segments = audiobook.syncJsonPath?.let { path ->
+                    SyncAlignmentSerializer.loadSegments(File(path))
+                }.orEmpty()
+                val matched = segments.firstOrNull {
+                    it.chapterIndex == curChapter && it.sentenceIndex == curSentence
+                } ?: segments.firstOrNull {
+                    it.chapterIndex == curChapter
+                }
+                if (matched != null) {
+                    matched.startMs
+                } else {
+                    val chapters = SyncAlignmentSerializer.decodeChapters(audiobook.chaptersJson)
+                    chapters.getOrNull(curChapter)?.startMs ?: audiobook.lastPositionMs
+                }
+            }.coerceIn(0L, audiobook.durationMs.coerceAtLeast(0L))
+
+            val syncTs = System.currentTimeMillis()
+            app.audiobookRepository.updatePlaybackProgress(audiobook.id, targetMs, syncTs)
+            current.book?.let { b ->
+                libraryRepo.updateReadingProgress(
+                    bookId = b.id,
+                    chapterIndex = curChapter,
+                    sentenceIndex = curSentence,
+                    scrollOffset = b.scrollOffset,
+                    totalChapters = current.chapters.size.coerceAtLeast(1),
+                    syncedAt = syncTs
+                )
+            }
+            M4bPlaybackService.sendAction(app, M4bPlaybackService.ACTION_LOAD_AND_PLAY) {
+                putExtra(M4bPlaybackService.EXTRA_BOOK_ID, audiobook.id)
+                putExtra(M4bPlaybackService.EXTRA_AUTO_PLAY, true)
+                putExtra(M4bPlaybackService.EXTRA_FORCE_RELOAD, true)
+            }
+            onReady(audiobook.id)
         }
     }
 

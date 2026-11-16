@@ -72,7 +72,34 @@ data class AudiobookEntity(
     val sourceEpubKey: String? = null,
     val sourceEpubIsDirect: Boolean = false,
     val syncJsonPath: String? = null,
+    val isFolderAudiobook: Boolean = false,
+    val folderUri: String? = null,
+    val chapterFilesJson: String = "[]",
     val lastPositionMs: Long = 0L,
     val lastPlayedAt: Long = 0L,
     val addedAt: Long = System.currentTimeMillis()
+)
+
+enum class PronunciationScope {
+    GLOBAL,
+    BOOK
+}
+
+@Entity(
+    tableName = "pronunciation_rules",
+    indices = [
+        Index(value = ["scope"]),
+        Index(value = ["bookId"])
+    ]
+)
+data class PronunciationRuleEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    val findText: String,
+    val replaceWith: String,
+    val scope: PronunciationScope = PronunciationScope.GLOBAL,
+    val bookId: Long? = null,
+    val matchCase: Boolean = false,
+    val wholeWordOnly: Boolean = true,
+    val isEnabled: Boolean = true
 )

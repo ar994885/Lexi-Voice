@@ -186,12 +186,125 @@ interface AudiobookDao {
     @Query("SELECT * FROM audiobooks WHERE fileUri = :fileUri LIMIT 1")
     suspend fun getAudiobookByUri(fileUri: String): AudiobookEntity?
 
+    @Query("SELECT * FROM audiobooks WHERE sourceEpubKey = :fileKey ORDER BY lastPlayedAt DESC, addedAt DESC")
+    fun observeAudiobooksBySourceEpubKey(fileKey: String): Flow<List<AudiobookEntity>>
+
+    @Query("SELECT * FROM audiobooks WHERE sourceEpubKey = :fileKey ORDER BY lastPlayedAt DESC, addedAt DESC LIMIT 1")
+    suspend fun getLatestAudiobookForEpub(fileKey: String): AudiobookEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAudiobook(entity: AudiobookEntity): Long
+
+    @Query(
+        """
+        UPDATE audiobooks SET
+            isDirectPath = :isDirectPath,
+            title = :title,
+            author = :author,
+            narrator = :narrator,
+            year = :year,
+            genre = :genre,
+            coverPath = :coverPath,
+            durationMs = :durationMs,
+            chapterCount = :chapterCount,
+            chaptersJson = :chaptersJson,
+            sourceEpubKey = :sourceEpubKey,
+            sourceEpubIsDirect = :sourceEpubIsDirect,
+            syncJsonPath = :syncJsonPath,
+            isFolderAudiobook = :isFolderAudiobook,
+            folderUri = :folderUri,
+            chapterFilesJson = :chapterFilesJson
+        WHERE id = :id
+        """
+    )
+    suspend fun updateAudiobookContent(
+        id: Long,
+        isDirectPath: Boolean,
+        title: String,
+        author: String,
+        narrator: String,
+        year: String,
+        genre: String,
+        coverPath: String?,
+        durationMs: Long,
+        chapterCount: Int,
+        chaptersJson: String,
+        sourceEpubKey: String?,
+        sourceEpubIsDirect: Boolean,
+        syncJsonPath: String?,
+        isFolderAudiobook: Boolean,
+        folderUri: String?,
+        chapterFilesJson: String
+    )
+
+    @Transaction
+    suspend fun upsertAudiobookPreservingProgress(entity: AudiobookEntity): Long {
+        val existing = getAudiobookByUri(entity.fileUri)
+        return if (existing != null) {
+            updateAudiobookContent(
+                id = existing.id,
+                isDirectPath = entity.isDirectPath,
+                title = entity.title,
+                author = entity.author,
+                narrator = entity.narrator,
+                year = entity.year,
+                genre = entity.genre,
+                coverPath = entity.coverPath ?: existing.coverPath,
+                durationMs = entity.durationMs,
+                chapterCount = entity.chapterCount,
+                chaptersJson = entity.chaptersJson,
+                sourceEpubKey = entity.sourceEpubKey ?: existing.sourceEpubKey,
+                sourceEpubIsDirect = if (entity.sourceEpubKey != null) entity.sourceEpubIsDirect else existing.sourceEpubIsDirect,
+                syncJsonPath = entity.syncJsonPath ?: existing.syncJsonPath,
+                isFolderAudiobook = entity.isFolderAudiobook,
+                folderUri = entity.folderUri ?: existing.folderUri,
+                chapterFilesJson = entity.chapterFilesJson
+            )
+            existing.id
+        } else {
+            upsertAudiobook(entity)
+        }
+    }
 
     @Query("UPDATE audiobooks SET lastPositionMs = :positionMs, lastPlayedAt = :playedAt WHERE id = :id")
     suspend fun updatePlaybackProgress(id: Long, positionMs: Long, playedAt: Long)
 
     @Query("DELETE FROM audiobooks WHERE id = :id")
     suspend fun deleteAudiobook(id: Long)
+}
+
+@Dao
+interface PronunciationRuleDao {
+    @Query("SELECT * FROM pronunciation_rules ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id DESC")
+    fun observeAllRules(): Flow<List<PronunciationRuleEntity>>
+
+    @Query(
+        """
+        SELECT * FROM pronunciation_rules
+        WHERE scope = 'GLOBAL' OR bookId = :bookId
+        ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id DESC
+        """
+    )
+    fun observeRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>>
+
+    @Query(
+        """
+        SELECT * FROM pronunciation_rules
+        WHERE isEnabled = 1 AND (scope = 'GLOBAL' OR (:bookId IS NOT NULL AND scope = 'BOOK' AND bookId = :bookId))
+        ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id ASC
+        """
+    )
+    suspend fun getEnabledRulesForPlayback(bookId: Long?): List<PronunciationRuleEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRule(rule: PronunciationRuleEntity): Long
+
+    @androidx.room.Update
+    suspend fun updateRule(rule: PronunciationRuleEntity)
+
+    @Query("UPDATE pronunciation_rules SET isEnabled = :enabled WHERE id = :id")
+    suspend fun setRuleEnabled(id: Long, enabled: Boolean)
+
+    @Query("DELETE FROM pronunciation_rules WHERE id = :id")
+    suspend fun deleteRule(id: Long)
 }

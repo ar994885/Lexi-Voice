@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -93,6 +94,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.LexiVoiceApplication
 import com.example.data.prefs.SavedExportFolder
 import com.example.epub.EpubParser
+import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsStateHolder
 import com.example.ui.theme.LexiVoiceTheme
 import kotlinx.coroutines.Dispatchers
@@ -192,6 +194,7 @@ private fun ExportChaptersScreen(
     var editingChapterPos by remember { mutableIntStateOf(-1) }
     var editChapterDraft by remember { mutableStateOf("") }
     var showOutputSheet by remember { mutableStateOf(false) }
+    var showTtsExportWarningDialog by remember { mutableStateOf(false) }
 
     // Advanced M4B Audiobook & Folder state
     var selectedFolderUri by remember { mutableStateOf("") }
@@ -640,6 +643,34 @@ private fun ExportChaptersScreen(
                     text = "Output Folder & Audiobook Settings",
                     style = MaterialTheme.typography.titleLarge
                 )
+                if (ttsState.isPlaying || ttsState.isActive) {
+                    Spacer(Modifier.height(10.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("export_tts_active_warning_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.WarningAmber,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Text(
+                                text = "Live TTS is ${if (ttsState.isPlaying) "playing" else "active"}. Exporting audio uses the same TTS engine — avoid running TTS playback while exporting so exported audio isn't degraded.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
 
                 // 1-Tap Previously Saved Folders
@@ -749,6 +780,28 @@ private fun ExportChaptersScreen(
                     )
                 }
 
+                if (fileKey.isNotBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Sync audio with EPUB read-along",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = "Stores sync_map.json in <Book Title>/ so MP3 folders & M4B highlight sentences",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = syncWithEpub, onCheckedChange = { syncWithEpub = it })
+                    }
+                }
+
                 if (combineM4b) {
                     Spacer(Modifier.height(10.dp))
                     Row(
@@ -761,28 +814,6 @@ private fun ExportChaptersScreen(
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Switch(checked = keepMp3s, onCheckedChange = { keepMp3s = it })
-                    }
-
-                    if (fileKey.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Sync M4B with EPUB read-along highlight",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                                Text(
-                                    text = "Saves exact sentence timing JSON for the M4B Player",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(checked = syncWithEpub, onCheckedChange = { syncWithEpub = it })
-                        }
                     }
 
                     Spacer(Modifier.height(12.dp))
@@ -897,49 +928,59 @@ private fun ExportChaptersScreen(
                 }
 
                 Spacer(Modifier.height(18.dp))
+                fun launchExportNow() {
+                    val chosen = chapters.filter { it.isSelected }
+                    if (chosen.isEmpty() || selectedFolderUri.isBlank()) return
+                    val config = ExportBatchConfig(
+                        sourceTitle = sourceTitle,
+                        bookFileKey = fileKey,
+                        isDirectPath = isDirectPath,
+                        coverPath = coverPath,
+                        outputTreeUri = selectedFolderUri,
+                        outputFolderName = selectedFolderName.ifBlank { "Export Folder" },
+                        chapters = chosen.map {
+                            ExportChapterRequest(
+                                index = it.index,
+                                originalTitle = it.originalTitle,
+                                exportTitle = it.exportTitle,
+                                href = it.href,
+                                wordCount = it.wordCount,
+                                estimatedMinutes = it.estimatedMinutes,
+                                plainTextOverride = it.plainTextOverride
+                            )
+                        },
+                        m4aMetadata = M4aMetadataConfig(
+                            enabled = combineM4b,
+                            keepMp3Files = keepMp3s,
+                            syncWithEpub = syncWithEpub,
+                            title = m4bTitle,
+                            author = m4bAuthor,
+                            album = m4bAlbum,
+                            narrator = m4bNarrator,
+                            year = m4bYear,
+                            genre = m4bGenre,
+                            includeCover = m4bIncludeCover,
+                            coverOverrideUri = customCoverUri
+                        ),
+                        enginePackage = ttsState.selectedEnginePackage,
+                        voiceName = ttsState.selectedVoiceName,
+                        localeTag = ttsState.selectedLocaleTag,
+                        speechRate = ttsState.speechRate,
+                        pitch = ttsState.pitch
+                    )
+                    AudioExportService.startExport(context, config)
+                    showOutputSheet = false
+                }
+
                 Button(
                     onClick = {
                         val chosen = chapters.filter { it.isSelected }
                         if (chosen.isEmpty() || selectedFolderUri.isBlank()) return@Button
-                        val config = ExportBatchConfig(
-                            sourceTitle = sourceTitle,
-                            bookFileKey = fileKey,
-                            isDirectPath = isDirectPath,
-                            coverPath = coverPath,
-                            outputTreeUri = selectedFolderUri,
-                            outputFolderName = selectedFolderName.ifBlank { "Export Folder" },
-                            chapters = chosen.map {
-                                ExportChapterRequest(
-                                    index = it.index,
-                                    originalTitle = it.originalTitle,
-                                    exportTitle = it.exportTitle,
-                                    href = it.href,
-                                    wordCount = it.wordCount,
-                                    estimatedMinutes = it.estimatedMinutes,
-                                    plainTextOverride = it.plainTextOverride
-                                )
-                            },
-                            m4aMetadata = M4aMetadataConfig(
-                                enabled = combineM4b,
-                                keepMp3Files = keepMp3s,
-                                syncWithEpub = syncWithEpub,
-                                title = m4bTitle,
-                                author = m4bAuthor,
-                                album = m4bAlbum,
-                                narrator = m4bNarrator,
-                                year = m4bYear,
-                                genre = m4bGenre,
-                                includeCover = m4bIncludeCover,
-                                coverOverrideUri = customCoverUri
-                            ),
-                            enginePackage = ttsState.selectedEnginePackage,
-                            voiceName = ttsState.selectedVoiceName,
-                            localeTag = ttsState.selectedLocaleTag,
-                            speechRate = ttsState.speechRate,
-                            pitch = ttsState.pitch
-                        )
-                        AudioExportService.startExport(context, config)
-                        showOutputSheet = false
+                        if (ttsState.isPlaying) {
+                            showTtsExportWarningDialog = true
+                        } else {
+                            launchExportNow()
+                        }
                     },
                     enabled = selectedFolderUri.isNotBlank() && selectedCount > 0,
                     modifier = Modifier
@@ -953,6 +994,49 @@ private fun ExportChaptersScreen(
                             else "Build M4B Audiobook ($selectedCount Ch)"
                         } else {
                             "Start Batch MP3 Export ($selectedCount Ch)"
+                        }
+                    )
+                }
+
+                if (showTtsExportWarningDialog) {
+                    AlertDialog(
+                        onDismissRequest = { showTtsExportWarningDialog = false },
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Default.WarningAmber,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        },
+                        title = { Text("Pause Live TTS Before Exporting?") },
+                        text = {
+                            Text(
+                                "Live TTS playback and batch audio export both use the Android TextToSpeech engine. " +
+                                    "Running them simultaneously can cause poor audio quality or skipped sentences."
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    showTtsExportWarningDialog = false
+                                    TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_PAUSE)
+                                    launchExportNow()
+                                },
+                                modifier = Modifier.testTag("export_pause_tts_and_start_button")
+                            ) {
+                                Text("Pause TTS & Start Export")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = {
+                                    showTtsExportWarningDialog = false
+                                    launchExportNow()
+                                },
+                                modifier = Modifier.testTag("export_anyway_button")
+                            ) {
+                                Text("Export Anyway")
+                            }
                         }
                     )
                 }

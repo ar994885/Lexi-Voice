@@ -8,13 +8,18 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import com.example.audiobook.AudiobookChapterMeta
+import com.example.audiobook.BookSyncMap
+import com.example.audiobook.Mp3ChapterFileMeta
 import com.example.audiobook.SyncAlignmentSegment
 import com.example.audiobook.SyncAlignmentSerializer
+import com.example.audiobook.SyncMapChapterEntry
 import com.example.data.db.AudiobookDao
 import com.example.data.db.AudiobookEntity
 import com.example.data.db.FolderDao
+import com.example.data.prefs.PreferencesRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -28,7 +33,8 @@ import java.security.MessageDigest
 class AudiobookRepository(
     private val context: Context,
     private val audiobookDao: AudiobookDao,
-    private val folderDao: FolderDao
+    private val folderDao: FolderDao,
+    private val preferencesRepository: PreferencesRepository? = null
 ) {
     val audiobooks: Flow<List<AudiobookEntity>> = audiobookDao.observeAllAudiobooks()
 
@@ -36,8 +42,18 @@ class AudiobookRepository(
 
     suspend fun getAudiobookById(id: Long): AudiobookEntity? = audiobookDao.getAudiobookById(id)
 
-    suspend fun updatePlaybackProgress(id: Long, positionMs: Long) = withContext(Dispatchers.IO) {
-        audiobookDao.updatePlaybackProgress(id, positionMs, System.currentTimeMillis())
+    fun observeAudiobooksForEpub(fileKey: String): Flow<List<AudiobookEntity>> =
+        audiobookDao.observeAudiobooksBySourceEpubKey(fileKey)
+
+    suspend fun getLatestAudiobookForEpub(fileKey: String): AudiobookEntity? =
+        audiobookDao.getLatestAudiobookForEpub(fileKey)
+
+    suspend fun updatePlaybackProgress(
+        id: Long,
+        positionMs: Long,
+        playedAt: Long = System.currentTimeMillis()
+    ) = withContext(Dispatchers.IO) {
+        audiobookDao.updatePlaybackProgress(id, positionMs, playedAt)
     }
 
     suspend fun registerExportedM4b(
@@ -52,7 +68,9 @@ class AudiobookRepository(
         chapters: List<AudiobookChapterMeta>,
         sourceEpubKey: String?,
         sourceEpubIsDirect: Boolean,
-        syncSegments: List<SyncAlignmentSegment>
+        syncSegments: List<SyncAlignmentSegment>,
+        folderUri: String? = null,
+        isDirectPath: Boolean = false
     ): Long = withContext(Dispatchers.IO) {
         val syncFile = if (syncSegments.isNotEmpty()) {
             val dir = File(context.filesDir, "sync").apply { mkdirs() }
@@ -66,24 +84,70 @@ class AudiobookRepository(
         val entity = AudiobookEntity(
             id = existing?.id ?: 0L,
             fileUri = fileUri,
-            isDirectPath = false,
+            isDirectPath = isDirectPath,
             title = title,
             author = author,
             narrator = narrator,
             year = year,
             genre = genre,
-            coverPath = coverPath,
+            coverPath = coverPath ?: existing?.coverPath,
             durationMs = durationMs,
-            chapterCount = chapters.size,
+            chapterCount = chapters.size.coerceAtLeast(1),
             chaptersJson = SyncAlignmentSerializer.encodeChapters(chapters),
-            sourceEpubKey = sourceEpubKey,
-            sourceEpubIsDirect = sourceEpubIsDirect,
-            syncJsonPath = syncFile,
+            sourceEpubKey = sourceEpubKey ?: existing?.sourceEpubKey,
+            sourceEpubIsDirect = if (sourceEpubKey != null) sourceEpubIsDirect else (existing?.sourceEpubIsDirect ?: false),
+            syncJsonPath = syncFile ?: existing?.syncJsonPath,
+            isFolderAudiobook = false,
+            folderUri = folderUri ?: existing?.folderUri,
+            chapterFilesJson = "[]",
             lastPositionMs = existing?.lastPositionMs ?: 0L,
             lastPlayedAt = existing?.lastPlayedAt ?: 0L,
             addedAt = existing?.addedAt ?: System.currentTimeMillis()
         )
-        audiobookDao.upsertAudiobook(entity)
+        audiobookDao.upsertAudiobookPreservingProgress(entity)
+    }
+
+    suspend fun registerExportedMp3Folder(
+        folderUri: String,
+        isDirectPath: Boolean,
+        syncMap: BookSyncMap
+    ): Long = withContext(Dispatchers.IO) {
+        val flattened = SyncAlignmentSerializer.flattenToTimeline(syncMap)
+        val folderKey = "folder://$folderUri"
+
+        val syncFile = if (flattened.segments.isNotEmpty()) {
+            val dir = File(context.filesDir, "sync").apply { mkdirs() }
+            val hash = sha256(folderKey)
+            File(dir, "$hash.json").also {
+                SyncAlignmentSerializer.saveSegments(it, flattened.segments)
+            }.absolutePath
+        } else null
+
+        val existing = audiobookDao.getAudiobookByUri(folderKey)
+        val entity = AudiobookEntity(
+            id = existing?.id ?: 0L,
+            fileUri = folderKey,
+            isDirectPath = isDirectPath,
+            title = syncMap.bookTitle,
+            author = syncMap.author,
+            narrator = syncMap.narrator,
+            year = syncMap.year,
+            genre = syncMap.genre,
+            coverPath = syncMap.coverPath ?: existing?.coverPath,
+            durationMs = flattened.totalDurationMs,
+            chapterCount = flattened.chapterFiles.size.coerceAtLeast(flattened.chapters.size).coerceAtLeast(1),
+            chaptersJson = SyncAlignmentSerializer.encodeChapters(flattened.chapters),
+            sourceEpubKey = syncMap.sourceEpubKey ?: existing?.sourceEpubKey,
+            sourceEpubIsDirect = if (syncMap.sourceEpubKey != null) syncMap.sourceEpubIsDirect else (existing?.sourceEpubIsDirect ?: false),
+            syncJsonPath = syncFile ?: existing?.syncJsonPath,
+            isFolderAudiobook = true,
+            folderUri = folderUri,
+            chapterFilesJson = SyncAlignmentSerializer.encodeChapterFiles(flattened.chapterFiles),
+            lastPositionMs = existing?.lastPositionMs ?: 0L,
+            lastPlayedAt = existing?.lastPlayedAt ?: 0L,
+            addedAt = existing?.addedAt ?: System.currentTimeMillis()
+        )
+        audiobookDao.upsertAudiobookPreservingProgress(entity)
     }
 
     suspend fun importM4bUri(uri: Uri): AudiobookEntity? = withContext(Dispatchers.IO) {
@@ -110,29 +174,72 @@ class AudiobookRepository(
             sourceEpubKey = existing?.sourceEpubKey,
             sourceEpubIsDirect = existing?.sourceEpubIsDirect ?: false,
             syncJsonPath = existing?.syncJsonPath,
+            isFolderAudiobook = false,
+            folderUri = existing?.folderUri,
+            chapterFilesJson = "[]",
             lastPositionMs = existing?.lastPositionMs ?: 0L,
             lastPlayedAt = existing?.lastPlayedAt ?: 0L,
             addedAt = existing?.addedAt ?: System.currentTimeMillis()
         )
-        val id = audiobookDao.upsertAudiobook(entity)
+        val id = audiobookDao.upsertAudiobookPreservingProgress(entity)
         audiobookDao.getAudiobookByUri(key) ?: entity.copy(id = id)
     }
 
-    suspend fun scanFoldersForM4b() = withContext(Dispatchers.IO) {
-        val folders = folderDao.getAllFolders()
-        for (folder in folders) {
+    suspend fun scanFoldersForAudiobooks() = withContext(Dispatchers.IO) {
+        val watched = folderDao.getAllFolders()
+        val exportFolderUris = runCatching {
+            preferencesRepository?.savedExportFolders?.first()?.map { it.uri }.orEmpty()
+        }.getOrDefault(emptyList())
+
+        val scannedSafTrees = HashSet<String>()
+
+        for (folder in watched) {
             if (folder.isDirectPath) {
-                val root = File(folder.uriOrPath)
-                if (root.exists() && root.isDirectory) {
-                    root.walkTopDown()
-                        .onEnter { !it.name.startsWith(".") }
-                        .filter { it.isFile && it.name.endsWith(".m4b", ignoreCase = true) }
-                        .forEach { file ->
-                            if (audiobookDao.getAudiobookByUri(file.absolutePath) == null) {
-                                val parsed = inspectM4bFromFile(file, file.nameWithoutExtension, file.absolutePath)
+                scanDirectDirectoryForAudiobooks(File(folder.uriOrPath))
+            } else {
+                if (scannedSafTrees.add(folder.uriOrPath)) {
+                    val treeUri = Uri.parse(folder.uriOrPath)
+                    val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: continue
+                    scanSafDirectoryForAudiobooks(treeUri, rootId)
+                }
+            }
+        }
+
+        for (uriStr in exportFolderUris) {
+            if (scannedSafTrees.add(uriStr)) {
+                val treeUri = Uri.parse(uriStr)
+                val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: continue
+                scanSafDirectoryForAudiobooks(treeUri, rootId)
+            }
+        }
+    }
+
+    suspend fun scanFoldersForM4b() = scanFoldersForAudiobooks()
+
+    private suspend fun scanDirectDirectoryForAudiobooks(root: File) {
+        if (!root.exists() || !root.isDirectory) return
+
+        val queue = ArrayDeque<File>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val dir = queue.removeFirst()
+            if (dir.name.startsWith(".")) continue
+            val children = dir.listFiles() ?: continue
+
+            val mp3Files = mutableListOf<File>()
+            var syncMapFile: File? = null
+
+            for (child in children) {
+                if (child.isDirectory) {
+                    if (!child.name.startsWith(".")) queue.addLast(child)
+                } else if (child.isFile) {
+                    when {
+                        child.name.endsWith(".m4b", ignoreCase = true) -> {
+                            if (audiobookDao.getAudiobookByUri(child.absolutePath) == null) {
+                                val parsed = inspectM4bFromFile(child, child.nameWithoutExtension, child.absolutePath)
                                 audiobookDao.upsertAudiobook(
                                     AudiobookEntity(
-                                        fileUri = file.absolutePath,
+                                        fileUri = child.absolutePath,
                                         isDirectPath = true,
                                         title = parsed.title,
                                         author = parsed.author,
@@ -142,31 +249,49 @@ class AudiobookRepository(
                                         coverPath = parsed.coverPath,
                                         durationMs = parsed.durationMs,
                                         chapterCount = parsed.chapters.size.coerceAtLeast(1),
-                                        chaptersJson = SyncAlignmentSerializer.encodeChapters(parsed.chapters)
+                                        chaptersJson = SyncAlignmentSerializer.encodeChapters(parsed.chapters),
+                                        folderUri = dir.absolutePath
                                     )
                                 )
                             }
                         }
+                        child.name.endsWith(".mp3", ignoreCase = true) -> mp3Files.add(child)
+                        child.name.equals("sync_map.json", ignoreCase = true) -> syncMapFile = child
+                    }
                 }
-            } else {
-                val treeUri = Uri.parse(folder.uriOrPath)
-                val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: continue
-                scanSafForM4b(treeUri, rootId)
+            }
+
+            if (mp3Files.isNotEmpty()) {
+                val existingSync = syncMapFile?.let {
+                    runCatching { SyncAlignmentSerializer.decodeBookSyncMap(it.readText()) }.getOrNull()
+                }
+                val syncMap = buildBookSyncMapFromDirectMp3s(dir, mp3Files, existingSync)
+                registerExportedMp3Folder(
+                    folderUri = dir.absolutePath,
+                    isDirectPath = true,
+                    syncMap = syncMap
+                )
             }
         }
     }
 
-    private suspend fun scanSafForM4b(treeUri: Uri, rootDocId: String) {
-        val queue = ArrayDeque<String>()
-        queue.add(rootDocId)
+    private suspend fun scanSafDirectoryForAudiobooks(treeUri: Uri, rootDocId: String) {
+        val queue = ArrayDeque<Pair<String, String>>()
+        queue.add(rootDocId to "Audiobooks")
         val proj = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE
         )
+
         while (queue.isNotEmpty()) {
-            val docId = queue.removeFirst()
+            val (docId, dirName) = queue.removeFirst()
+            val dirUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+
+            val mp3Docs = mutableListOf<Triple<String, String, Uri>>()
+            var syncMapUri: Uri? = null
+
             runCatching {
                 context.contentResolver.query(childrenUri, proj, null, null, null)?.use { c ->
                     val idIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
@@ -177,21 +302,213 @@ class AudiobookRepository(
                         val name = c.getString(nameIdx).orEmpty()
                         val mime = c.getString(mimeIdx).orEmpty()
                         if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                            if (!name.startsWith(".")) queue.addLast(cid)
-                        } else if (name.endsWith(".m4b", ignoreCase = true)) {
+                            if (!name.startsWith(".")) queue.addLast(cid to name)
+                        } else {
                             val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, cid)
-                            if (audiobookDao.getAudiobookByUri(docUri.toString()) == null) {
-                                importM4bUri(docUri)
+                            when {
+                                name.endsWith(".m4b", ignoreCase = true) -> {
+                                    if (audiobookDao.getAudiobookByUri(docUri.toString()) == null) {
+                                        importM4bUri(docUri)
+                                    }
+                                }
+                                name.endsWith(".mp3", ignoreCase = true) -> {
+                                    mp3Docs.add(Triple(cid, name, docUri))
+                                }
+                                name.equals("sync_map.json", ignoreCase = true) -> {
+                                    syncMapUri = docUri
+                                }
                             }
                         }
                     }
                 }
             }
+
+            if (mp3Docs.isNotEmpty()) {
+                val existingSync = syncMapUri?.let { uri ->
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { r ->
+                            SyncAlignmentSerializer.decodeBookSyncMap(r.readText())
+                        }
+                    }.getOrNull()
+                }
+                val syncMap = buildBookSyncMapFromSafMp3s(
+                    folderName = dirName,
+                    mp3Docs = mp3Docs,
+                    existingSync = existingSync
+                )
+                registerExportedMp3Folder(
+                    folderUri = dirUri.toString(),
+                    isDirectPath = false,
+                    syncMap = syncMap
+                )
+            }
         }
+    }
+
+    private fun buildBookSyncMapFromDirectMp3s(
+        dir: File,
+        mp3Files: List<File>,
+        existingSync: BookSyncMap?
+    ): BookSyncMap {
+        val sorted = mp3Files.sortedBy { it.name.lowercase() }
+        val existingByName = existingSync?.chapters.orEmpty().associateBy { it.fileName }
+        var detectedAlbum = existingSync?.bookTitle.orEmpty()
+        var detectedArtist = existingSync?.author.orEmpty()
+        var detectedCoverPath = existingSync?.coverPath
+
+        val chapterEntries = sorted.mapIndexed { idx, file ->
+            val prev = existingByName[file.name]
+            val meta = inspectMp3FromFile(file)
+            if (detectedAlbum.isBlank() && meta.album.isNotBlank()) detectedAlbum = meta.album
+            if (detectedArtist.isBlank() && meta.artist.isNotBlank()) detectedArtist = meta.artist
+            if (detectedCoverPath == null && meta.coverBytes != null) {
+                detectedCoverPath = saveCoverBytes(meta.coverBytes, dir.absolutePath)
+            }
+            SyncMapChapterEntry(
+                chapterIndex = prev?.chapterIndex ?: extractChapterIndexFromFileName(file.name, idx),
+                title = prev?.title?.takeIf { it.isNotBlank() } ?: meta.title.ifBlank { file.nameWithoutExtension },
+                fileName = file.name,
+                fileUri = file.absolutePath,
+                durationMs = prev?.durationMs?.takeIf { it > 0L } ?: meta.durationMs.coerceAtLeast(1000L),
+                isDirectPath = true,
+                sentences = prev?.sentences.orEmpty()
+            )
+        }
+
+        return BookSyncMap(
+            bookTitle = detectedAlbum.ifBlank { dir.name },
+            author = detectedArtist.ifBlank { "Unknown Author" },
+            narrator = existingSync?.narrator ?: "Audiobook",
+            year = existingSync?.year ?: "2026",
+            genre = existingSync?.genre ?: "Audiobook",
+            coverPath = detectedCoverPath,
+            sourceEpubKey = existingSync?.sourceEpubKey,
+            sourceEpubIsDirect = existingSync?.sourceEpubIsDirect ?: false,
+            chapters = chapterEntries
+        )
+    }
+
+    private fun buildBookSyncMapFromSafMp3s(
+        folderName: String,
+        mp3Docs: List<Triple<String, String, Uri>>,
+        existingSync: BookSyncMap?
+    ): BookSyncMap {
+        val sorted = mp3Docs.sortedBy { it.second.lowercase() }
+        val existingByName = existingSync?.chapters.orEmpty().associateBy { it.fileName }
+        var detectedAlbum = existingSync?.bookTitle.orEmpty()
+        var detectedArtist = existingSync?.author.orEmpty()
+        var detectedCoverPath = existingSync?.coverPath
+
+        val chapterEntries = sorted.mapIndexed { idx, (_, name, uri) ->
+            val prev = existingByName[name]
+            val meta = if (prev != null && prev.durationMs > 0L && detectedAlbum.isNotBlank()) {
+                ParsedMp3Info(prev.title, detectedArtist, detectedAlbum, prev.durationMs, null)
+            } else {
+                inspectMp3FromUri(uri, name.removeSuffix(".mp3").removeSuffix(".MP3"))
+            }
+            if (detectedAlbum.isBlank() && meta.album.isNotBlank()) detectedAlbum = meta.album
+            if (detectedArtist.isBlank() && meta.artist.isNotBlank()) detectedArtist = meta.artist
+            if (detectedCoverPath == null && meta.coverBytes != null) {
+                detectedCoverPath = saveCoverBytes(meta.coverBytes, uri.toString())
+            }
+            SyncMapChapterEntry(
+                chapterIndex = prev?.chapterIndex ?: extractChapterIndexFromFileName(name, idx),
+                title = prev?.title?.takeIf { it.isNotBlank() }
+                    ?: meta.title.ifBlank { name.removeSuffix(".mp3") },
+                fileName = name,
+                fileUri = uri.toString(),
+                durationMs = prev?.durationMs?.takeIf { it > 0L } ?: meta.durationMs.coerceAtLeast(1000L),
+                isDirectPath = false,
+                sentences = prev?.sentences.orEmpty()
+            )
+        }
+
+        return BookSyncMap(
+            bookTitle = detectedAlbum.ifBlank { folderName },
+            author = detectedArtist.ifBlank { "Unknown Author" },
+            narrator = existingSync?.narrator ?: "Audiobook",
+            year = existingSync?.year ?: "2026",
+            genre = existingSync?.genre ?: "Audiobook",
+            coverPath = detectedCoverPath,
+            sourceEpubKey = existingSync?.sourceEpubKey,
+            sourceEpubIsDirect = existingSync?.sourceEpubIsDirect ?: false,
+            chapters = chapterEntries
+        )
+    }
+
+    private fun extractChapterIndexFromFileName(fileName: String, fallbackIdx: Int): Int {
+        val prefix = Regex("^(\\d{1,4})\\s*[-_.]").find(fileName)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        return if (prefix != null && prefix > 0) prefix - 1 else fallbackIdx
     }
 
     suspend fun deleteAudiobook(id: Long) = withContext(Dispatchers.IO) {
         audiobookDao.deleteAudiobook(id)
+    }
+
+    suspend fun deleteSourceMp3Chapters(audiobook: AudiobookEntity, chapterUris: List<Mp3ChapterFileMeta>) =
+        withContext(Dispatchers.IO) {
+            for (ch in chapterUris) {
+                runCatching {
+                    if (ch.isDirectPath) {
+                        File(ch.fileUri).delete()
+                    } else {
+                        DocumentFile.fromSingleUri(context, Uri.parse(ch.fileUri))?.delete()
+                    }
+                }
+            }
+            if (audiobook.isFolderAudiobook) {
+                audiobookDao.deleteAudiobook(audiobook.id)
+            }
+        }
+
+    private data class ParsedMp3Info(
+        val title: String,
+        val artist: String,
+        val album: String,
+        val durationMs: Long,
+        val coverBytes: ByteArray?
+    )
+
+    private fun inspectMp3FromUri(uri: Uri, fallbackTitle: String): ParsedMp3Info {
+        val retriever = MediaMetadataRetriever()
+        var title = fallbackTitle
+        var artist = ""
+        var album = ""
+        var durationMs = 0L
+        var coverBytes: ByteArray? = null
+        runCatching {
+            retriever.setDataSource(context, uri)
+            title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                ?.takeIf { it.isNotBlank() } ?: fallbackTitle
+            artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orEmpty()
+            album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty()
+            durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+            coverBytes = retriever.embeddedPicture
+        }
+        runCatching { retriever.release() }
+        return ParsedMp3Info(title, artist, album, durationMs, coverBytes)
+    }
+
+    private fun inspectMp3FromFile(file: File): ParsedMp3Info {
+        val retriever = MediaMetadataRetriever()
+        var title = file.nameWithoutExtension
+        var artist = ""
+        var album = ""
+        var durationMs = 0L
+        var coverBytes: ByteArray? = null
+        runCatching {
+            retriever.setDataSource(file.absolutePath)
+            title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                ?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
+            artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orEmpty()
+            album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty()
+            durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+            coverBytes = retriever.embeddedPicture
+        }
+        runCatching { retriever.release() }
+        return ParsedMp3Info(title, artist, album, durationMs, coverBytes)
     }
 
     private data class ParsedM4bInfo(
@@ -312,8 +629,8 @@ class AudiobookRepository(
         if (boxSize < 17 || idx + boxSize > bytes.size) return emptyList()
 
         val bb = ByteBuffer.wrap(bytes, idx + 8, boxSize - 8).order(ByteOrder.BIG_ENDIAN)
-        bb.int // version + flags
-        bb.get() // reserved
+        bb.int
+        bb.get()
         val count = bb.int.coerceIn(0, 2000)
         val rawList = mutableListOf<Pair<Long, String>>()
         for (c in 0 until count) {
@@ -331,7 +648,7 @@ class AudiobookRepository(
         }
     }
 
-    private fun saveCoverBytes(rawBytes: ByteArray, key: String): String? {
+    fun saveCoverBytes(rawBytes: ByteArray, key: String): String? {
         return runCatching {
             val coversDir = File(context.filesDir, "covers").apply { mkdirs() }
             val target = File(coversDir, "m4b_${sha256(key)}.jpg")

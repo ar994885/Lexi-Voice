@@ -13,6 +13,7 @@ import android.os.PowerManager
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
@@ -20,12 +21,15 @@ import androidx.media.session.MediaButtonReceiver
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.LexiVoiceApplication
 import com.example.MainActivity
 import com.example.data.db.AudiobookEntity
+import com.example.overlay.FloatingOverlayController
+import com.example.overlay.UnifiedOverlaySource
 import com.example.tts.SleepTimerMode
 import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsStateHolder
@@ -38,9 +42,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -52,6 +59,7 @@ data class M4bPlaybackState(
     val coverPath: String? = null,
     val isActive: Boolean = false,
     val isPlaying: Boolean = false,
+    val isFolderAudiobook: Boolean = false,
     val currentPositionMs: Long = 0L,
     val durationMs: Long = 0L,
     val playbackSpeed: Float = 1.0f,
@@ -63,7 +71,8 @@ data class M4bPlaybackState(
     val sourceEpubIsDirect: Boolean = false,
     val hasSyncedEpub: Boolean = false,
     val activeSyncChapterIndex: Int = 0,
-    val activeSyncSentenceIndex: Int = -1
+    val activeSyncSentenceIndex: Int = -1,
+    val activeSyncText: String = ""
 )
 
 object M4bPlayerStateHolder {
@@ -90,9 +99,16 @@ class M4bPlaybackService : Service() {
     private lateinit var mediaSession: MediaSessionCompat
     private var wakeLock: PowerManager.WakeLock? = null
     private var pollerJob: Job? = null
+    private var bookObserverJob: Job? = null
+    private val refreshMutex = Mutex()
     private var sleepEndTimeMs: Long = 0L
     private var lastChapterForSleep: Int = -1
     private var lastSavedTick: Long = 0L
+
+    private var loadedBookId: Long = -1L
+    private var isPlaylistMode: Boolean = false
+    private var playlistChapters: List<AudiobookChapterMeta> = emptyList()
+    private var playlistChapterFiles: List<Mp3ChapterFileMeta> = emptyList()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -105,11 +121,11 @@ class M4bPlaybackService : Service() {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() = resumePlayback()
                 override fun onPause() = pausePlayback()
-                override fun onSkipToNext() = jumpRelativeChapter(1)
-                override fun onSkipToPrevious() = jumpRelativeChapter(-1)
+                override fun onSkipToNext() = jumpRelativeChapterAsync(1)
+                override fun onSkipToPrevious() = jumpRelativeChapterAsync(-1)
                 override fun onFastForward() = skipBy(30_000L)
                 override fun onRewind() = skipBy(-15_000L)
-                override fun onSeekTo(pos: Long) = seekTo(pos)
+                override fun onSeekTo(pos: Long) = seekToGlobal(pos)
                 override fun onStop() = stopAndDismiss()
             })
             isActive = true
@@ -128,6 +144,7 @@ class M4bPlaybackService : Service() {
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         M4bPlayerStateHolder.updateState { it.copy(isPlaying = isPlaying) }
                         if (isPlaying) {
+                            FloatingOverlayController.markActiveSource(UnifiedOverlaySource.AUDIOBOOK)
                             acquireWakeLock()
                             startPositionPoller()
                         } else {
@@ -137,18 +154,39 @@ class M4bPlaybackService : Service() {
                         updateMediaSessionAndNotification()
                     }
 
+                    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                        if (isPlaylistMode) {
+                            refreshPositionAndSync(computeGlobalPositionMs(this@apply))
+                            persistProgressNow()
+                            updateMediaSessionAndNotification()
+                        }
+                    }
+
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_READY) {
-                            val dur = duration.coerceAtLeast(0L)
-                            if (dur > 0L) {
-                                M4bPlayerStateHolder.updateState { it.copy(durationMs = dur) }
+                            if (!isPlaylistMode) {
+                                val dur = duration.coerceAtLeast(0L)
+                                if (dur > 0L) {
+                                    M4bPlayerStateHolder.updateState { it.copy(durationMs = dur) }
+                                }
                             }
                             updateMediaSessionAndNotification()
                         } else if (playbackState == Player.STATE_ENDED) {
                             M4bPlayerStateHolder.updateState { it.copy(isPlaying = false) }
                             persistProgressNow()
                             updateMediaSessionAndNotification()
+                            serviceScope.launch {
+                                syncLatestFromDatabase(autoPlayOnNewAfterEnd = true)
+                            }
                         }
+                    }
+
+                    override fun onPlayerError(error: PlaybackException) {
+                        Log.e("M4bPlaybackService", "ExoPlayer playback error: ${error.message}", error)
+                        M4bPlayerStateHolder.updateState { it.copy(isPlaying = false) }
+                        releaseWakeLock()
+                        persistProgressNow()
+                        updateMediaSessionAndNotification()
                     }
                 })
             }
@@ -164,8 +202,14 @@ class M4bPlaybackService : Service() {
             ACTION_LOAD_AND_PLAY -> {
                 val bookId = intent.getLongExtra(EXTRA_BOOK_ID, -1L)
                 val autoPlay = intent.getBooleanExtra(EXTRA_AUTO_PLAY, true)
+                val forceReload = intent.getBooleanExtra(EXTRA_FORCE_RELOAD, false)
                 if (bookId > 0L) {
-                    loadAudiobook(bookId, autoPlay)
+                    loadAudiobook(bookId, autoPlay, forceReload)
+                }
+            }
+            ACTION_SYNC_CHAPTERS -> {
+                serviceScope.launch {
+                    syncLatestFromDatabase(autoPlayOnNewAfterEnd = false)
                 }
             }
             ACTION_TOGGLE_PLAY_PAUSE -> {
@@ -173,15 +217,19 @@ class M4bPlaybackService : Service() {
             }
             ACTION_SEEK_TO -> {
                 val pos = intent.getLongExtra(EXTRA_POSITION_MS, 0L)
-                seekTo(pos)
+                seekToGlobal(pos)
             }
             ACTION_SKIP_BY -> {
                 val delta = intent.getLongExtra(EXTRA_DELTA_MS, 0L)
                 skipBy(delta)
             }
+            ACTION_NEXT_SENTENCE -> jumpRelativeSentence(1)
+            ACTION_PREV_SENTENCE -> jumpRelativeSentence(-1)
+            ACTION_NEXT_CHAPTER -> jumpRelativeChapterAsync(1)
+            ACTION_PREV_CHAPTER -> jumpRelativeChapterAsync(-1)
             ACTION_JUMP_CHAPTER -> {
                 val idx = intent.getIntExtra(EXTRA_CHAPTER_INDEX, 0)
-                jumpToChapter(idx)
+                jumpToChapterAsync(idx)
             }
             ACTION_SET_SPEED -> {
                 val speed = intent.getFloatExtra(EXTRA_SPEED, 1.0f).coerceIn(0.5f, 2.5f)
@@ -199,17 +247,31 @@ class M4bPlaybackService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun loadAudiobook(bookId: Long, autoPlay: Boolean) {
+    private fun buildMediaItem(cf: Mp3ChapterFileMeta): MediaItem {
+        val itemUri = if (cf.isDirectPath) Uri.fromFile(File(cf.fileUri)) else Uri.parse(cf.fileUri)
+        return MediaItem.fromUri(itemUri)
+    }
+
+    private fun loadAudiobook(bookId: Long, autoPlay: Boolean, forceReload: Boolean) {
         val currentId = M4bPlayerStateHolder.state.value.audiobookId
-        if (currentId == bookId && exoPlayer?.mediaItemCount ?: 0 > 0) {
-            if (autoPlay && exoPlayer?.isPlaying == false) resumePlayback()
+        if (!forceReload && currentId == bookId && loadedBookId == bookId && (exoPlayer?.mediaItemCount ?: 0) > 0) {
+            startObservingAudiobook(bookId)
+            serviceScope.launch {
+                syncLatestFromDatabase(autoPlayOnNewAfterEnd = autoPlay)
+                if (autoPlay && exoPlayer?.isPlaying == false) {
+                    resumePlayback()
+                }
+            }
             return
         }
 
-        // Pause TTS if it was active so voices never overlap
         if (TtsStateHolder.state.value.isPlaying) {
             TtsPlaybackService.sendAction(this, TtsPlaybackService.ACTION_PAUSE)
         }
+        FloatingOverlayController.markActiveSource(UnifiedOverlaySource.AUDIOBOOK)
+
+        bookObserverJob?.cancel()
+        loadedBookId = bookId
 
         val app = applicationContext as LexiVoiceApplication
         serviceScope.launch {
@@ -220,26 +282,134 @@ class M4bPlaybackService : Service() {
                 stopSelf()
                 return@launch
             }
+            applyEntityUpdate(
+                entity = entity,
+                isInitialLoad = true,
+                autoPlayOnInitial = autoPlay,
+                autoPlayOnNewAfterEnd = autoPlay
+            )
+            startObservingAudiobook(bookId)
+        }
+    }
 
-            val chapters = withContext(Dispatchers.IO) {
-                SyncAlignmentSerializer.decodeChapters(entity.chaptersJson)
-            }
-            val segments = withContext(Dispatchers.IO) {
-                entity.syncJsonPath?.let { path ->
-                    SyncAlignmentSerializer.loadSegments(File(path))
-                }.orEmpty()
-            }
-            M4bPlayerStateHolder.setSyncSegments(segments)
+    private fun startObservingAudiobook(bookId: Long) {
+        if (bookObserverJob?.isActive == true && loadedBookId == bookId) return
+        bookObserverJob?.cancel()
+        val app = applicationContext as LexiVoiceApplication
+        bookObserverJob = serviceScope.launch {
+            app.audiobookRepository.observeAudiobook(bookId)
+                .distinctUntilChanged()
+                .collect { entity ->
+                    if (entity != null && entity.id == loadedBookId) {
+                        applyEntityUpdate(
+                            entity = entity,
+                            isInitialLoad = false,
+                            autoPlayOnNewAfterEnd = false
+                        )
+                    }
+                }
+        }
+    }
 
-            val uri = if (entity.isDirectPath) {
-                Uri.fromFile(File(entity.fileUri))
+    private suspend fun syncLatestFromDatabase(autoPlayOnNewAfterEnd: Boolean) {
+        val bookId = loadedBookId
+        if (bookId <= 0L) return
+        val app = applicationContext as LexiVoiceApplication
+        val latest = withContext(Dispatchers.IO) {
+            app.audiobookRepository.getAudiobookById(bookId)
+        } ?: return
+        applyEntityUpdate(
+            entity = latest,
+            isInitialLoad = false,
+            autoPlayOnNewAfterEnd = autoPlayOnNewAfterEnd
+        )
+    }
+
+    private suspend fun applyEntityUpdate(
+        entity: AudiobookEntity,
+        isInitialLoad: Boolean,
+        autoPlayOnInitial: Boolean = true,
+        autoPlayOnNewAfterEnd: Boolean = false
+    ) = refreshMutex.withLock {
+        if (loadedBookId != entity.id) return@withLock
+
+        val (chapters, chapterFiles, segments) = withContext(Dispatchers.IO) {
+            val chs = SyncAlignmentSerializer.decodeChapters(entity.chaptersJson)
+            val files = if (entity.isFolderAudiobook) {
+                SyncAlignmentSerializer.decodeChapterFiles(entity.chapterFilesJson)
             } else {
-                Uri.parse(entity.fileUri)
+                emptyList()
             }
+            val segs = entity.syncJsonPath?.let { path ->
+                SyncAlignmentSerializer.loadSegments(File(path))
+            }.orEmpty()
+            Triple(chs, files, segs)
+        }
 
-            val startPos = entity.lastPositionMs.coerceAtLeast(0L)
+        val usePlaylist = entity.isFolderAudiobook && chapterFiles.isNotEmpty()
+        val resolvedChapters = if (usePlaylist) {
+            if (chapters.size == chapterFiles.size) chapters
+            else chapterFiles.mapIndexed { idx, cf ->
+                AudiobookChapterMeta(idx, cf.title, cf.startMs, cf.endMs)
+            }
+        } else {
+            chapters
+        }
+        val totalDur = if (usePlaylist) {
+            resolvedChapters.lastOrNull()?.endMs ?: entity.durationMs
+        } else {
+            entity.durationMs
+        }
+
+        if (!isInitialLoad) {
+            val filesUnchanged = !usePlaylist ||
+                (chapterFiles == playlistChapterFiles && resolvedChapters == playlistChapters)
+            val singleM4bUnchanged = usePlaylist ||
+                (resolvedChapters == playlistChapters && totalDur == M4bPlayerStateHolder.state.value.durationMs)
+            val segsUnchanged = segments.size == M4bPlayerStateHolder.syncSegments.size
+            val mediaSynced = if (usePlaylist) {
+                exoPlayer?.mediaItemCount == chapterFiles.size
+            } else {
+                true
+            }
+            if (filesUnchanged && singleM4bUnchanged && segsUnchanged && mediaSynced) {
+                return@withLock
+            }
+        }
+
+        M4bPlayerStateHolder.setSyncSegments(segments)
+        val previousFiles = playlistChapterFiles
+        isPlaylistMode = usePlaylist
+        playlistChapters = resolvedChapters
+        playlistChapterFiles = chapterFiles
+
+        val player = exoPlayer
+        if (isInitialLoad) {
+            var startPos = entity.lastPositionMs.coerceIn(0L, totalDur.coerceAtLeast(entity.lastPositionMs))
+            var inheritedFromLibrary = false
+            if (!entity.sourceEpubKey.isNullOrBlank() && segments.isNotEmpty()) {
+                val app = applicationContext as LexiVoiceApplication
+                val linkedBook = withContext(Dispatchers.IO) {
+                    app.libraryRepository.getBookByFileKey(entity.sourceEpubKey)
+                }
+                if (linkedBook != null &&
+                    (entity.lastPlayedAt == 0L || linkedBook.lastOpenedAt > entity.lastPlayedAt) &&
+                    (linkedBook.currentChapterIndex > 0 || linkedBook.currentSentenceIndex > 0)
+                ) {
+                    val exactSeg = segments.firstOrNull {
+                        it.chapterIndex == linkedBook.currentChapterIndex &&
+                            it.sentenceIndex == linkedBook.currentSentenceIndex
+                    } ?: segments.firstOrNull {
+                        it.chapterIndex == linkedBook.currentChapterIndex
+                    }
+                    if (exactSeg != null) {
+                        startPos = exactSeg.startMs.coerceIn(0L, totalDur.coerceAtLeast(exactSeg.startMs))
+                        inheritedFromLibrary = true
+                    }
+                }
+            }
             val initialSeg = SyncAlignmentSerializer.findSegmentAtPosition(segments, startPos)
-            val chIdx = findChapterIndex(chapters, startPos)
+            val chIdx = findChapterIndex(resolvedChapters, startPos)
             lastChapterForSleep = chIdx
 
             M4bPlayerStateHolder.updateState {
@@ -248,13 +418,14 @@ class M4bPlaybackService : Service() {
                     title = entity.title,
                     author = entity.author,
                     narrator = entity.narrator,
-                    coverPath = entity.coverPath,
+                    coverPath = entity.coverPath ?: it.coverPath,
                     isActive = true,
-                    isPlaying = autoPlay,
+                    isPlaying = autoPlayOnInitial,
+                    isFolderAudiobook = usePlaylist,
                     currentPositionMs = startPos,
-                    durationMs = entity.durationMs,
+                    durationMs = totalDur,
                     playbackSpeed = it.playbackSpeed,
-                    chapters = chapters,
+                    chapters = resolvedChapters,
                     currentChapterIndex = chIdx,
                     sleepTimerMode = it.sleepTimerMode,
                     sleepRemainingMs = it.sleepRemainingMs,
@@ -262,31 +433,155 @@ class M4bPlaybackService : Service() {
                     sourceEpubIsDirect = entity.sourceEpubIsDirect,
                     hasSyncedEpub = !entity.sourceEpubKey.isNullOrBlank() && segments.isNotEmpty(),
                     activeSyncChapterIndex = initialSeg?.chapterIndex ?: 0,
-                    activeSyncSentenceIndex = initialSeg?.sentenceIndex ?: -1
+                    activeSyncSentenceIndex = initialSeg?.sentenceIndex ?: -1,
+                    activeSyncText = initialSeg?.text.orEmpty()
                 )
             }
 
-            exoPlayer?.apply {
-                setMediaItem(MediaItem.fromUri(uri))
+            player?.apply {
+                if (usePlaylist) {
+                    val mediaItems = chapterFiles.map { buildMediaItem(it) }
+                    val startItemIdx = chIdx.coerceIn(0, mediaItems.lastIndex)
+                    val chStart = resolvedChapters.getOrNull(startItemIdx)?.startMs ?: 0L
+                    val offsetInItem = (startPos - chStart).coerceAtLeast(0L)
+                    setMediaItems(mediaItems, startItemIdx, offsetInItem)
+                } else {
+                    val uri = if (entity.isDirectPath) {
+                        Uri.fromFile(File(entity.fileUri))
+                    } else {
+                        Uri.parse(entity.fileUri)
+                    }
+                    setMediaItem(MediaItem.fromUri(uri))
+                    if (startPos > 0L) seekTo(startPos)
+                }
                 playbackParameters = PlaybackParameters(M4bPlayerStateHolder.state.value.playbackSpeed)
                 prepare()
-                if (startPos > 0L) seekTo(startPos)
-                playWhenReady = autoPlay
+                playWhenReady = autoPlayOnInitial
             }
 
             startForeground(NOTIFICATION_ID, buildNotification())
+            if (inheritedFromLibrary) {
+                persistProgressNow(overridePosMs = startPos)
+            }
             updateMediaSessionAndNotification()
-            if (autoPlay) startPositionPoller()
+            if (autoPlayOnInitial) startPositionPoller()
+            return@withLock
         }
+
+        if (player != null && usePlaylist) {
+            val wasEnded = player.playbackState == Player.STATE_ENDED
+            val wasTryingToPlay = player.isPlaying || player.playWhenReady
+
+            val isPureAppend = previousFiles.isNotEmpty() &&
+                chapterFiles.size > previousFiles.size &&
+                player.mediaItemCount == previousFiles.size &&
+                (0 until previousFiles.size).all { previousFiles[it].fileUri == chapterFiles[it].fileUri }
+
+            if (isPureAppend) {
+                val addedItems = chapterFiles.subList(previousFiles.size, chapterFiles.size).map { buildMediaItem(it) }
+                player.addMediaItems(addedItems)
+                if (wasEnded) {
+                    val nextIdx = previousFiles.size.coerceIn(0, (chapterFiles.size - 1).coerceAtLeast(0))
+                    player.seekTo(nextIdx, 0L)
+                    player.prepare()
+                    val shouldPlay = autoPlayOnNewAfterEnd || wasTryingToPlay
+                    player.playWhenReady = shouldPlay
+                    if (shouldPlay) startPositionPoller()
+                }
+            } else if (chapterFiles != previousFiles || player.mediaItemCount != chapterFiles.size) {
+                val curIdx = player.currentMediaItemIndex
+                val activeFileUri = previousFiles.getOrNull(curIdx)?.fileUri
+                val curItemOffset = player.currentPosition.coerceAtLeast(0L)
+                val globalPosBefore = computeGlobalPositionMs(player)
+
+                val matchedIdx = activeFileUri?.let { uri ->
+                    chapterFiles.indexOfFirst { it.fileUri == uri }
+                }?.takeIf { it >= 0 }
+
+                val targetIdx: Int
+                val targetOffset: Long
+                if (matchedIdx != null) {
+                    if (wasEnded && matchedIdx + 1 < chapterFiles.size) {
+                        targetIdx = matchedIdx + 1
+                        targetOffset = 0L
+                    } else {
+                        targetIdx = matchedIdx
+                        targetOffset = curItemOffset
+                    }
+                } else {
+                    val fallbackIdx = findChapterIndex(resolvedChapters, globalPosBefore)
+                        .coerceIn(0, (chapterFiles.size - 1).coerceAtLeast(0))
+                    val chStart = resolvedChapters.getOrNull(fallbackIdx)?.startMs ?: 0L
+                    targetIdx = fallbackIdx
+                    targetOffset = (globalPosBefore - chStart).coerceAtLeast(0L)
+                }
+
+                val allItems = chapterFiles.map { buildMediaItem(it) }
+                player.setMediaItems(allItems, targetIdx, targetOffset)
+                player.playbackParameters = PlaybackParameters(M4bPlayerStateHolder.state.value.playbackSpeed)
+                player.prepare()
+                val shouldPlay = autoPlayOnNewAfterEnd || wasTryingToPlay
+                player.playWhenReady = shouldPlay
+                if (shouldPlay) startPositionPoller()
+            }
+        }
+
+        val livePos = player?.let { computeGlobalPositionMs(it) } ?: M4bPlayerStateHolder.state.value.currentPositionMs
+        val chIdx = if (usePlaylist && player != null) {
+            player.currentMediaItemIndex.coerceIn(0, (resolvedChapters.size - 1).coerceAtLeast(0))
+        } else {
+            findChapterIndex(resolvedChapters, livePos)
+        }
+        val activeSeg = SyncAlignmentSerializer.findSegmentAtPosition(segments, livePos)
+
+        M4bPlayerStateHolder.updateState {
+            it.copy(
+                title = entity.title.ifBlank { it.title },
+                author = entity.author.ifBlank { it.author },
+                narrator = entity.narrator.ifBlank { it.narrator },
+                coverPath = entity.coverPath ?: it.coverPath,
+                isFolderAudiobook = usePlaylist,
+                currentPositionMs = livePos,
+                durationMs = totalDur,
+                chapters = resolvedChapters,
+                currentChapterIndex = chIdx,
+                sourceEpubKey = entity.sourceEpubKey ?: it.sourceEpubKey,
+                sourceEpubIsDirect = if (entity.sourceEpubKey != null) entity.sourceEpubIsDirect else it.sourceEpubIsDirect,
+                hasSyncedEpub = !(entity.sourceEpubKey ?: it.sourceEpubKey).isNullOrBlank() && segments.isNotEmpty(),
+                activeSyncChapterIndex = activeSeg?.chapterIndex ?: it.activeSyncChapterIndex,
+                activeSyncSentenceIndex = activeSeg?.sentenceIndex ?: it.activeSyncSentenceIndex,
+                activeSyncText = activeSeg?.text ?: it.activeSyncText
+            )
+        }
+        updateMediaSessionAndNotification()
     }
 
     private fun resumePlayback() {
         if (TtsStateHolder.state.value.isPlaying) {
             TtsPlaybackService.sendAction(this, TtsPlaybackService.ACTION_PAUSE)
         }
-        exoPlayer?.play()
-        startForeground(NOTIFICATION_ID, buildNotification())
-        startPositionPoller()
+        FloatingOverlayController.markActiveSource(UnifiedOverlaySource.AUDIOBOOK)
+        serviceScope.launch {
+            val prevCount = exoPlayer?.mediaItemCount ?: 0
+            syncLatestFromDatabase(autoPlayOnNewAfterEnd = true)
+            val player = exoPlayer ?: return@launch
+            if (player.playbackState == Player.STATE_ENDED) {
+                val grew = player.mediaItemCount > prevCount
+                if (!grew) {
+                    if (isPlaylistMode) {
+                        player.seekTo(0, 0L)
+                    } else {
+                        player.seekTo(0L)
+                    }
+                }
+                player.prepare()
+            } else if (player.playbackState == Player.STATE_IDLE) {
+                player.prepare()
+            }
+            player.play()
+            startForeground(NOTIFICATION_ID, buildNotification())
+            startPositionPoller()
+        }
     }
 
     private fun pausePlayback() {
@@ -295,29 +590,104 @@ class M4bPlaybackService : Service() {
         updateMediaSessionAndNotification()
     }
 
-    private fun seekTo(posMs: Long) {
-        val dur = exoPlayer?.duration?.takeIf { it > 0L } ?: M4bPlayerStateHolder.state.value.durationMs
+    private fun computeGlobalPositionMs(player: ExoPlayer): Long {
+        if (!isPlaylistMode) return player.currentPosition.coerceAtLeast(0L)
+        val idx = player.currentMediaItemIndex.coerceIn(0, (playlistChapters.size - 1).coerceAtLeast(0))
+        val chStart = playlistChapters.getOrNull(idx)?.startMs ?: 0L
+        return chStart + player.currentPosition.coerceAtLeast(0L)
+    }
+
+    private fun seekToGlobal(posMs: Long) {
+        val player = exoPlayer ?: return
+        val dur = if (isPlaylistMode) {
+            M4bPlayerStateHolder.state.value.durationMs
+        } else {
+            player.duration.takeIf { it > 0L } ?: M4bPlayerStateHolder.state.value.durationMs
+        }
         val clamped = posMs.coerceIn(0L, dur.coerceAtLeast(posMs))
-        exoPlayer?.seekTo(clamped)
+        if (isPlaylistMode && playlistChapters.isNotEmpty()) {
+            val targetIdx = findChapterIndex(playlistChapters, clamped).coerceIn(0, playlistChapters.lastIndex)
+            val chStart = playlistChapters[targetIdx].startMs
+            val offsetInItem = (clamped - chStart).coerceAtLeast(0L)
+            player.seekTo(targetIdx, offsetInItem)
+        } else {
+            player.seekTo(clamped)
+        }
+        if (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
+            player.prepare()
+        }
         refreshPositionAndSync(clamped)
         persistProgressNow()
     }
 
     private fun skipBy(deltaMs: Long) {
-        val current = exoPlayer?.currentPosition ?: M4bPlayerStateHolder.state.value.currentPositionMs
-        seekTo(current + deltaMs)
+        val player = exoPlayer
+        val current = if (player != null) computeGlobalPositionMs(player) else M4bPlayerStateHolder.state.value.currentPositionMs
+        seekToGlobal(current + deltaMs)
     }
 
-    private fun jumpToChapter(chapterIndex: Int) {
+    private fun jumpRelativeSentence(delta: Int) {
+        serviceScope.launch {
+            syncLatestFromDatabase(autoPlayOnNewAfterEnd = false)
+            val segments = M4bPlayerStateHolder.syncSegments
+            if (segments.isEmpty()) {
+                skipBy(if (delta > 0) 30_000L else -15_000L)
+                return@launch
+            }
+            val st = M4bPlayerStateHolder.state.value
+            val curIdx = segments.indexOfFirst {
+                it.chapterIndex == st.activeSyncChapterIndex && it.sentenceIndex == st.activeSyncSentenceIndex
+            }.takeIf { it >= 0 } ?: 0
+            val target = (curIdx + delta).coerceIn(0, segments.lastIndex)
+            seekToGlobal(segments[target].startMs)
+        }
+    }
+
+    private fun jumpToChapterAsync(chapterIndex: Int) {
+        serviceScope.launch {
+            syncLatestFromDatabase(autoPlayOnNewAfterEnd = false)
+            jumpToChapterInternal(chapterIndex, startPlayback = false)
+        }
+    }
+
+    private fun jumpRelativeChapterAsync(delta: Int) {
+        val oldIdx = M4bPlayerStateHolder.state.value.currentChapterIndex
+        val wasEnded = exoPlayer?.playbackState == Player.STATE_ENDED
+        serviceScope.launch {
+            syncLatestFromDatabase(autoPlayOnNewAfterEnd = false)
+            val chapters = M4bPlayerStateHolder.state.value.chapters
+            if (chapters.isEmpty()) return@launch
+            val targetIdx = (oldIdx + delta).coerceIn(0, (chapters.size - 1).coerceAtLeast(0))
+            jumpToChapterInternal(targetIdx, startPlayback = wasEnded)
+        }
+    }
+
+    private fun jumpToChapterInternal(chapterIndex: Int, startPlayback: Boolean) {
         val chapters = M4bPlayerStateHolder.state.value.chapters
-        val target = chapters.getOrNull(chapterIndex) ?: return
-        seekTo(target.startMs)
-    }
-
-    private fun jumpRelativeChapter(delta: Int) {
-        val st = M4bPlayerStateHolder.state.value
-        val targetIdx = (st.currentChapterIndex + delta).coerceIn(0, (st.chapters.size - 1).coerceAtLeast(0))
-        jumpToChapter(targetIdx)
+        if (chapters.isEmpty()) return
+        val clampedIdx = chapterIndex.coerceIn(0, chapters.lastIndex)
+        val target = chapters[clampedIdx]
+        val player = exoPlayer
+        if (isPlaylistMode) {
+            val itemIdx = clampedIdx.coerceIn(0, ((player?.mediaItemCount ?: 1) - 1).coerceAtLeast(0))
+            player?.seekTo(itemIdx, 0L)
+            if (player != null && (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED)) {
+                player.prepare()
+            }
+            if (startPlayback) {
+                player?.play()
+                startPositionPoller()
+            }
+            refreshPositionAndSync(target.startMs)
+            persistProgressNow()
+            updateMediaSessionAndNotification()
+        } else {
+            seekToGlobal(target.startMs)
+            if (startPlayback) {
+                player?.play()
+                startPositionPoller()
+            }
+        }
     }
 
     private fun configureSleepTimer(mode: SleepTimerMode, minutes: Int) {
@@ -341,7 +711,7 @@ class M4bPlaybackService : Service() {
             while (isActive) {
                 val player = exoPlayer
                 if (player != null) {
-                    val pos = player.currentPosition.coerceAtLeast(0L)
+                    val pos = computeGlobalPositionMs(player)
                     refreshPositionAndSync(pos)
 
                     val now = System.currentTimeMillis()
@@ -350,7 +720,6 @@ class M4bPlaybackService : Service() {
                         persistProgressNow()
                     }
 
-                    // Sleep Timer checks
                     val st = M4bPlayerStateHolder.state.value
                     if (st.sleepTimerMode == SleepTimerMode.MINUTES && sleepEndTimeMs > 0L) {
                         val rem = sleepEndTimeMs - now
@@ -374,7 +743,12 @@ class M4bPlaybackService : Service() {
 
     private fun refreshPositionAndSync(posMs: Long) {
         val st = M4bPlayerStateHolder.state.value
-        val chIdx = findChapterIndex(st.chapters, posMs)
+        val chIdx = if (isPlaylistMode) {
+            exoPlayer?.currentMediaItemIndex?.coerceIn(0, (st.chapters.size - 1).coerceAtLeast(0))
+                ?: findChapterIndex(st.chapters, posMs)
+        } else {
+            findChapterIndex(st.chapters, posMs)
+        }
         val segments = M4bPlayerStateHolder.syncSegments
         val seg = SyncAlignmentSerializer.findSegmentAtPosition(segments, posMs)
 
@@ -383,7 +757,8 @@ class M4bPlaybackService : Service() {
                 currentPositionMs = posMs,
                 currentChapterIndex = chIdx,
                 activeSyncChapterIndex = seg?.chapterIndex ?: it.activeSyncChapterIndex,
-                activeSyncSentenceIndex = seg?.sentenceIndex ?: it.activeSyncSentenceIndex
+                activeSyncSentenceIndex = seg?.sentenceIndex ?: it.activeSyncSentenceIndex,
+                activeSyncText = seg?.text ?: it.activeSyncText
             )
         }
     }
@@ -394,19 +769,43 @@ class M4bPlaybackService : Service() {
         return idx.coerceAtLeast(0)
     }
 
-    private fun persistProgressNow() {
-        val id = M4bPlayerStateHolder.state.value.audiobookId
-        val pos = exoPlayer?.currentPosition ?: M4bPlayerStateHolder.state.value.currentPositionMs
+    private fun persistProgressNow(overridePosMs: Long? = null) {
+        val st = M4bPlayerStateHolder.state.value
+        val id = st.audiobookId
+        val pos = overridePosMs ?: exoPlayer?.let { computeGlobalPositionMs(it) } ?: st.currentPositionMs
         if (id <= 0L) return
+        val syncTs = System.currentTimeMillis()
+        val epubKey = st.sourceEpubKey
+        val activeSeg = SyncAlignmentSerializer.findSegmentAtPosition(M4bPlayerStateHolder.syncSegments, pos)
+        val targetCh = activeSeg?.chapterIndex ?: st.currentChapterIndex
+        val targetSent = activeSeg?.sentenceIndex ?: st.activeSyncSentenceIndex.coerceAtLeast(0)
+        val fallbackTotalChapters = st.chapters.size
+
         val app = applicationContext as LexiVoiceApplication
         serviceScope.launch(Dispatchers.IO) {
-            app.audiobookRepository.updatePlaybackProgress(id, pos)
+            app.audiobookRepository.updatePlaybackProgress(id, pos, syncTs)
+            if (!epubKey.isNullOrBlank()) {
+                val book = app.libraryRepository.getBookByFileKey(epubKey)
+                if (book != null) {
+                    app.libraryRepository.updateReadingProgress(
+                        bookId = book.id,
+                        chapterIndex = targetCh,
+                        sentenceIndex = targetSent,
+                        scrollOffset = 0,
+                        totalChapters = book.chapterCount.coerceAtLeast(fallbackTotalChapters).coerceAtLeast(1),
+                        syncedAt = syncTs
+                    )
+                }
+            }
         }
     }
 
     private fun stopAndDismiss() {
         persistProgressNow()
         pollerJob?.cancel()
+        bookObserverJob?.cancel()
+        loadedBookId = -1L
+        playlistChapterFiles = emptyList()
         exoPlayer?.stop()
         M4bPlayerStateHolder.updateState { it.copy(isActive = false, isPlaying = false) }
         releaseWakeLock()
@@ -515,6 +914,7 @@ class M4bPlaybackService : Service() {
     override fun onDestroy() {
         persistProgressNow()
         pollerJob?.cancel()
+        bookObserverJob?.cancel()
         exoPlayer?.release()
         exoPlayer = null
         mediaSession.release()
@@ -527,9 +927,14 @@ class M4bPlaybackService : Service() {
         private const val NOTIFICATION_ID = 4301
 
         const val ACTION_LOAD_AND_PLAY = "com.example.m4b.LOAD_AND_PLAY"
+        const val ACTION_SYNC_CHAPTERS = "com.example.m4b.SYNC_CHAPTERS"
         const val ACTION_TOGGLE_PLAY_PAUSE = "com.example.m4b.TOGGLE_PLAY_PAUSE"
         const val ACTION_SEEK_TO = "com.example.m4b.SEEK_TO"
         const val ACTION_SKIP_BY = "com.example.m4b.SKIP_BY"
+        const val ACTION_NEXT_SENTENCE = "com.example.m4b.NEXT_SENTENCE"
+        const val ACTION_PREV_SENTENCE = "com.example.m4b.PREV_SENTENCE"
+        const val ACTION_NEXT_CHAPTER = "com.example.m4b.NEXT_CHAPTER"
+        const val ACTION_PREV_CHAPTER = "com.example.m4b.PREV_CHAPTER"
         const val ACTION_JUMP_CHAPTER = "com.example.m4b.JUMP_CHAPTER"
         const val ACTION_SET_SPEED = "com.example.m4b.SET_SPEED"
         const val ACTION_SET_SLEEP_TIMER = "com.example.m4b.SET_SLEEP_TIMER"
@@ -537,6 +942,7 @@ class M4bPlaybackService : Service() {
 
         const val EXTRA_BOOK_ID = "extra_book_id"
         const val EXTRA_AUTO_PLAY = "extra_auto_play"
+        const val EXTRA_FORCE_RELOAD = "extra_force_reload"
         const val EXTRA_POSITION_MS = "extra_position_ms"
         const val EXTRA_DELTA_MS = "extra_delta_ms"
         const val EXTRA_CHAPTER_INDEX = "extra_chapter_index"
@@ -546,7 +952,11 @@ class M4bPlaybackService : Service() {
 
         fun sendAction(context: Context, action: String, extras: Intent.() -> Unit = {}) {
             val intent = Intent(context, M4bPlaybackService::class.java).setAction(action).apply(extras)
-            ContextCompat.startForegroundService(context, intent)
+            if (action == ACTION_STOP) {
+                runCatching { context.startService(intent) }
+            } else {
+                ContextCompat.startForegroundService(context, intent)
+            }
         }
     }
 }

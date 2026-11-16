@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipNext
@@ -78,6 +79,7 @@ import com.example.audiobook.M4bPlayerStateHolder
 import com.example.data.prefs.ReaderSettings
 import com.example.epub.EpubChapterSummary
 import com.example.epub.EpubParser
+import com.example.overlay.FloatingOverlayController
 import com.example.tts.SleepTimerMode
 import com.example.ui.components.EpubWebView
 import kotlinx.coroutines.Dispatchers
@@ -89,11 +91,13 @@ import java.util.Locale
 fun M4bPlayerScreen(
     audiobookId: Long,
     onBack: () -> Unit,
+    forceReadAlongTrigger: Long = 0L,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as LexiVoiceApplication
     val playerState by M4bPlayerStateHolder.state.collectAsStateWithLifecycle()
+    val overlayState by FloatingOverlayController.state.collectAsStateWithLifecycle()
     val readerSettings by app.preferencesRepository.readerSettings.collectAsStateWithLifecycle(ReaderSettings())
 
     var showChaptersSheet by remember { mutableStateOf(false) }
@@ -106,12 +110,20 @@ fun M4bPlayerScreen(
 
     BackHandler { onBack() }
 
+    LaunchedEffect(forceReadAlongTrigger) {
+        if (forceReadAlongTrigger > 0L) {
+            readAlongEnabled = true
+        }
+    }
+
     LaunchedEffect(audiobookId) {
         if (playerState.audiobookId != audiobookId || !playerState.isActive) {
             M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_LOAD_AND_PLAY) {
                 putExtra(M4bPlaybackService.EXTRA_BOOK_ID, audiobookId)
                 putExtra(M4bPlaybackService.EXTRA_AUTO_PLAY, true)
             }
+        } else {
+            M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SYNC_CHAPTERS)
         }
     }
 
@@ -189,8 +201,13 @@ fun M4bPlayerScreen(
                         )
                         val chLabel = playerState.chapters.getOrNull(playerState.currentChapterIndex)?.title
                             ?: playerState.author
+                        val subtitleText = if (playerState.chapters.isNotEmpty()) {
+                            "Ch ${playerState.currentChapterIndex + 1}/${playerState.chapters.size} • $chLabel"
+                        } else {
+                            chLabel
+                        }
                         Text(
-                            text = chLabel,
+                            text = subtitleText,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -199,6 +216,18 @@ fun M4bPlayerScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = {
+                            FloatingOverlayController.setVisible(context, !overlayState.isVisible)
+                        },
+                        modifier = Modifier.testTag("m4b_floating_popup_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PictureInPictureAlt,
+                            contentDescription = if (overlayState.isVisible) "Hide Floating Overlay" else "Show Floating Overlay",
+                            tint = if (overlayState.isVisible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                     if (playerState.hasSyncedEpub) {
                         IconButton(
                             onClick = { readAlongEnabled = !readAlongEnabled },
@@ -215,7 +244,7 @@ fun M4bPlayerScreen(
                         onClick = { showChaptersSheet = true },
                         modifier = Modifier.testTag("m4b_chapters_button")
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "M4B Chapters")
+                        Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Audiobook Chapters")
                     }
                 }
             )
@@ -283,10 +312,7 @@ fun M4bPlayerScreen(
                         }
                         IconButton(
                             onClick = {
-                                val prevIdx = (playerState.currentChapterIndex - 1).coerceAtLeast(0)
-                                M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_JUMP_CHAPTER) {
-                                    putExtra(M4bPlaybackService.EXTRA_CHAPTER_INDEX, prevIdx)
-                                }
+                                M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_PREV_CHAPTER)
                             },
                             modifier = Modifier.testTag("m4b_prev_chapter_button")
                         ) {
@@ -327,11 +353,7 @@ fun M4bPlayerScreen(
                         }
                         IconButton(
                             onClick = {
-                                val nextIdx = (playerState.currentChapterIndex + 1)
-                                    .coerceAtMost((playerState.chapters.size - 1).coerceAtLeast(0))
-                                M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_JUMP_CHAPTER) {
-                                    putExtra(M4bPlaybackService.EXTRA_CHAPTER_INDEX, nextIdx)
-                                }
+                                M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_NEXT_CHAPTER)
                             },
                             modifier = Modifier.testTag("m4b_next_chapter_button")
                         ) {
@@ -470,7 +492,7 @@ fun M4bPlayerScreen(
                     modifier = Modifier.padding(bottom = 10.dp)
                 )
                 LazyColumn(modifier = Modifier.height(400.dp)) {
-                    items(playerState.chapters, key = { it.index }) { ch ->
+                    items(playerState.chapters, key = { "${it.index}_${it.startMs}" }) { ch ->
                         val isCurrent = ch.index == playerState.currentChapterIndex
                         Row(
                             modifier = Modifier

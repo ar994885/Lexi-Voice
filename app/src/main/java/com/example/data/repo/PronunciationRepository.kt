@@ -1,0 +1,50 @@
+package com.example.data.repo
+
+import com.example.data.db.PronunciationRuleDao
+import com.example.data.db.PronunciationRuleEntity
+import com.example.data.db.PronunciationScope
+import kotlinx.coroutines.flow.Flow
+
+class PronunciationRepository(
+    private val dao: PronunciationRuleDao
+) {
+    fun observeAllRules(): Flow<List<PronunciationRuleEntity>> = dao.observeAllRules()
+
+    fun observeRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>> = dao.observeRulesForBook(bookId)
+
+    suspend fun getEnabledRulesForPlayback(bookId: Long?): List<PronunciationRuleEntity> =
+        dao.getEnabledRulesForPlayback(bookId)
+
+    suspend fun saveRule(
+        id: Long = 0L,
+        findText: String,
+        replaceWith: String,
+        scope: PronunciationScope,
+        bookId: Long?,
+        matchCase: Boolean,
+        wholeWordOnly: Boolean,
+        isEnabled: Boolean = true
+    ): Long {
+        val normalizedBookId = if (scope == PronunciationScope.BOOK) bookId?.takeIf { it > 0L } else null
+        val entity = PronunciationRuleEntity(
+            id = id,
+            findText = findText.trim(),
+            replaceWith = replaceWith.trim(),
+            scope = scope,
+            bookId = normalizedBookId,
+            matchCase = matchCase,
+            wholeWordOnly = wholeWordOnly,
+            isEnabled = isEnabled
+        )
+        return if (id > 0L) {
+            dao.updateRule(entity)
+            id
+        } else {
+            dao.insertRule(entity)
+        }
+    }
+
+    suspend fun setRuleEnabled(id: Long, enabled: Boolean) = dao.setRuleEnabled(id, enabled)
+
+    suspend fun deleteRule(id: Long) = dao.deleteRule(id)
+}
