@@ -18,13 +18,15 @@ data class ExportChapterRequest(
 data class M4aMetadataConfig(
     val enabled: Boolean = false,
     val keepMp3Files: Boolean = true,
+    val syncWithEpub: Boolean = true,
     val title: String = "",
     val author: String = "",
     val album: String = "",
     val narrator: String = "LexiVoice TTS",
     val year: String = "2026",
     val genre: String = "Audiobook",
-    val includeCover: Boolean = true
+    val includeCover: Boolean = true,
+    val coverOverrideUri: String? = null
 )
 
 data class ExportBatchConfig(

@@ -6,6 +6,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
@@ -19,7 +21,9 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.LexiVoiceApplication
 import com.example.MainActivity
 import com.example.R
+import com.example.epub.EpubChapterSummary
 import com.example.epub.EpubParser
+import com.example.epub.ReaderSentence
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -29,8 +33,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.text.BreakIterator
 import java.util.Locale
 import java.util.UUID
@@ -100,7 +106,7 @@ class AudioExportService : Service() {
         exportJob = serviceScope.launch {
             wakeLock?.let { if (!it.isHeld) it.acquire(4 * 60 * 60 * 1000L) }
             val workDir = File(cacheDir, "export_${System.currentTimeMillis()}").apply { mkdirs() }
-            val generatedMp3Inputs = mutableListOf<ChapterInputFile>()
+            val m4bChapterGroups = mutableListOf<M4bChapterWavGroup>()
             var exportedCount = 0
 
             try {
@@ -121,18 +127,28 @@ class AudioExportService : Service() {
                 val outputTree = DocumentFile.fromTreeUri(applicationContext, Uri.parse(config.outputTreeUri))
                     ?: throw IllegalStateException("Cannot access selected export folder")
 
-                val chapterTextMap = if (config.bookFileKey.isNotBlank()) {
+                val buildM4b = config.m4aMetadata.enabled
+                val chapterSummaries = config.chapters.map {
+                    EpubChapterSummary(index = it.index, title = it.originalTitle, href = it.href)
+                }
+
+                val chapterSentencesMap: Map<Int, List<ReaderSentence>> = if (buildM4b && config.bookFileKey.isNotBlank()) {
+                    EpubParser.loadAllChapterSentencesForExport(
+                        context = applicationContext,
+                        fileKey = config.bookFileKey,
+                        isDirectPath = config.isDirectPath,
+                        chapters = chapterSummaries
+                    )
+                } else {
+                    emptyMap()
+                }
+
+                val chapterTextMap: Map<Int, String> = if (!buildM4b && config.bookFileKey.isNotBlank()) {
                     EpubParser.loadAllChaptersForExport(
                         context = applicationContext,
                         fileKey = config.bookFileKey,
                         isDirectPath = config.isDirectPath,
-                        chapters = config.chapters.map {
-                            com.example.epub.EpubChapterSummary(
-                                index = it.index,
-                                title = it.originalTitle,
-                                href = it.href
-                            )
-                        }
+                        chapters = chapterSummaries
                     )
                 } else {
                     emptyMap()
@@ -152,67 +168,138 @@ class AudioExportService : Service() {
                         chapterPercent = 0,
                         currentChapterNum = chapterNum,
                         totalChapters = total,
-                        batchPercent = ((batchIdx.toFloat() / total.toFloat()) * 100f).toInt()
+                        batchPercent = ((batchIdx.toFloat() / total.toFloat()) * (if (buildM4b) 90f else 100f)).toInt()
                     )
 
-                    val rawText = chapterReq.plainTextOverride
-                        ?: chapterTextMap[chapterReq.index]
-                        ?: ""
-
-                    val chunks = splitTextIntoSafeTtsChunks(
-                        text = if (rawText.isBlank()) chapterReq.exportTitle else rawText,
-                        maxChunkChars = 1500
-                    )
-
-                    val wavChunkFiles = mutableListOf<File>()
-                    chunks.forEachIndexed { chunkIdx, chunkText ->
-                        if (isCancelledFlag) throw CancellationException("Cancelled by user")
-                        val wavFile = File(workDir, "c_${batchIdx}_k_${chunkIdx}.wav")
-                        val ok = synthesizeChunkToWav(chunkText, wavFile)
-                        if (ok && wavFile.exists() && wavFile.length() > 44L) {
-                            wavChunkFiles.add(wavFile)
+                    if (buildM4b) {
+                        val sentences: List<ReaderSentence> = if (chapterReq.plainTextOverride != null) {
+                            EpubParser.parsePlainTextToChapter(chapterReq.exportTitle, chapterReq.plainTextOverride).sentences
+                        } else {
+                            chapterSentencesMap[chapterReq.index].orEmpty()
+                        }.ifEmpty {
+                            listOf(
+                                ReaderSentence(
+                                    globalIndex = 0,
+                                    paragraphIndex = 0,
+                                    startInParagraph = 0,
+                                    endInParagraph = chapterReq.exportTitle.length,
+                                    text = chapterReq.exportTitle
+                                )
+                            )
                         }
-                        val chPct = (((chunkIdx + 1).toFloat() / chunks.size.toFloat()) * 85f).toInt()
-                        val overallPct = (((batchIdx + (chPct / 100f)) / total.toFloat()) * 100f).toInt()
-                        updateDualNotification(
-                            chapterTitle = chapterReq.exportTitle,
-                            chapterPercent = chPct,
-                            currentChapterNum = chapterNum,
-                            totalChapters = total,
-                            batchPercent = overallPct
+
+                        val sentenceWavs = mutableListOf<M4bSentenceWavInput>()
+                        val allChapterWavFiles = mutableListOf<File>()
+
+                        sentences.forEachIndexed { sPos, sentence ->
+                            if (isCancelledFlag) throw CancellationException("Cancelled by user")
+                            val subChunks = splitTextIntoSafeTtsChunks(sentence.text, maxChunkChars = 1400)
+                            val chunkWavs = mutableListOf<File>()
+                            subChunks.forEachIndexed { subIdx, subText ->
+                                val cleanSpeech = subText.trim()
+                                if (cleanSpeech.isNotBlank()) {
+                                    val wavFile = File(workDir, "c_${batchIdx}_s_${sPos}_$subIdx.wav")
+                                    val ok = synthesizeChunkToWav(cleanSpeech, wavFile)
+                                    if (ok && wavFile.exists() && wavFile.length() > 44L) {
+                                        chunkWavs.add(wavFile)
+                                        allChapterWavFiles.add(wavFile)
+                                    } else {
+                                        wavFile.delete()
+                                    }
+                                }
+                            }
+                            sentenceWavs.add(
+                                M4bSentenceWavInput(
+                                    sentenceIndex = sentence.globalIndex,
+                                    text = sentence.text,
+                                    wavFiles = chunkWavs
+                                )
+                            )
+                            if (sPos % 3 == 0 || sPos == sentences.lastIndex) {
+                                val chPct = (((sPos + 1).toFloat() / sentences.size.toFloat()) * 90f).toInt()
+                                val overallPct = (((batchIdx + (chPct / 100f)) / total.toFloat()) * 88f).toInt()
+                                updateDualNotification(
+                                    chapterTitle = chapterReq.exportTitle,
+                                    chapterPercent = chPct,
+                                    currentChapterNum = chapterNum,
+                                    totalChapters = total,
+                                    batchPercent = overallPct,
+                                    exportedCount = exportedCount
+                                )
+                            }
+                        }
+
+                        if (config.m4aMetadata.keepMp3Files && allChapterWavFiles.isNotEmpty()) {
+                            val tempMp3 = File(workDir, mp3FileName)
+                            val mp3Ok = Mp3AudioEncoder.mergeWavChunksToMp3(
+                                wavFiles = allChapterWavFiles,
+                                outputMp3 = tempMp3,
+                                title = chapterReq.exportTitle,
+                                artist = config.m4aMetadata.author.ifBlank { "LexiVoice" },
+                                album = config.m4aMetadata.album.ifBlank { config.sourceTitle },
+                                trackNumber = chapterNum,
+                                bitrateKbps = 96
+                            )
+                            if (mp3Ok) {
+                                writeFileToSafFolder(outputTree, tempMp3, "audio/mpeg", mp3FileName)
+                                exportedCount++
+                            }
+                            tempMp3.delete()
+                        }
+
+                        m4bChapterGroups.add(
+                            M4bChapterWavGroup(
+                                chapterIndex = chapterReq.index,
+                                chapterTitle = chapterReq.exportTitle,
+                                sentences = sentenceWavs
+                            )
                         )
-                    }
-
-                    val tempMp3 = File(workDir, mp3FileName)
-                    val mp3Ok = Mp3AudioEncoder.mergeWavChunksToMp3(
-                        wavFiles = wavChunkFiles,
-                        outputMp3 = tempMp3,
-                        title = chapterReq.exportTitle,
-                        artist = config.m4aMetadata.author.ifBlank { "LexiVoice" },
-                        album = config.m4aMetadata.album.ifBlank { config.sourceTitle },
-                        trackNumber = chapterNum,
-                        bitrateKbps = 96
-                    )
-                    wavChunkFiles.forEach { it.delete() }
-
-                    if (mp3Ok) {
-                        if (!config.m4aMetadata.enabled || config.m4aMetadata.keepMp3Files) {
+                    } else {
+                        val rawText = chapterReq.plainTextOverride
+                            ?: chapterTextMap[chapterReq.index]
+                            ?: ""
+                        val chunks = splitTextIntoSafeTtsChunks(
+                            text = if (rawText.isBlank()) chapterReq.exportTitle else rawText,
+                            maxChunkChars = 1500
+                        )
+                        val wavChunkFiles = mutableListOf<File>()
+                        chunks.forEachIndexed { chunkIdx, chunkText ->
+                            if (isCancelledFlag) throw CancellationException("Cancelled by user")
+                            val wavFile = File(workDir, "c_${batchIdx}_k_${chunkIdx}.wav")
+                            val ok = synthesizeChunkToWav(chunkText, wavFile)
+                            if (ok && wavFile.exists() && wavFile.length() > 44L) {
+                                wavChunkFiles.add(wavFile)
+                            }
+                            val chPct = (((chunkIdx + 1).toFloat() / chunks.size.toFloat()) * 85f).toInt()
+                            val overallPct = (((batchIdx + (chPct / 100f)) / total.toFloat()) * 100f).toInt()
+                            updateDualNotification(
+                                chapterTitle = chapterReq.exportTitle,
+                                chapterPercent = chPct,
+                                currentChapterNum = chapterNum,
+                                totalChapters = total,
+                                batchPercent = overallPct,
+                                exportedCount = exportedCount
+                            )
+                        }
+                        val tempMp3 = File(workDir, mp3FileName)
+                        val mp3Ok = Mp3AudioEncoder.mergeWavChunksToMp3(
+                            wavFiles = wavChunkFiles,
+                            outputMp3 = tempMp3,
+                            title = chapterReq.exportTitle,
+                            artist = config.m4aMetadata.author.ifBlank { "LexiVoice" },
+                            album = config.m4aMetadata.album.ifBlank { config.sourceTitle },
+                            trackNumber = chapterNum,
+                            bitrateKbps = 96
+                        )
+                        wavChunkFiles.forEach { it.delete() }
+                        if (mp3Ok) {
                             writeFileToSafFolder(outputTree, tempMp3, "audio/mpeg", mp3FileName)
                             exportedCount++
                         }
-                        if (config.m4aMetadata.enabled) {
-                            generatedMp3Inputs.add(
-                                ChapterInputFile(
-                                    chapterTitle = chapterReq.exportTitle,
-                                    mp3File = tempMp3
-                                )
-                            )
-                        } else {
-                            tempMp3.delete()
-                        }
+                        tempMp3.delete()
                     }
 
-                    val overallDonePct = (((batchIdx + 1).toFloat() / total.toFloat()) * 100f).toInt()
+                    val overallDonePct = (((batchIdx + 1).toFloat() / total.toFloat()) * (if (buildM4b) 88f else 100f)).toInt()
                     updateDualNotification(
                         chapterTitle = chapterReq.exportTitle,
                         chapterPercent = 100,
@@ -223,45 +310,65 @@ class AudioExportService : Service() {
                     )
                 }
 
-                var m4aOutputName: String? = null
-                if (config.m4aMetadata.enabled && generatedMp3Inputs.isNotEmpty() && !isCancelledFlag) {
-                    val m4aTitle = sanitizeFileName(
-                        config.m4aMetadata.title.ifBlank { config.sourceTitle }
-                    )
-                    val m4aFileName = "$m4aTitle.m4a"
-                    val tempM4a = File(workDir, m4aFileName)
-                    val coverBytes = config.coverPath?.let { path ->
-                        runCatching { File(path).takeIf { it.exists() }?.readBytes() }.getOrNull()
-                    }
+                var m4bOutputName: String? = null
+                if (buildM4b && m4bChapterGroups.isNotEmpty() && !isCancelledFlag) {
+                    val m4bTitle = sanitizeFileName(config.m4aMetadata.title.ifBlank { config.sourceTitle })
+                    val m4bFileName = "$m4bTitle.m4b"
+                    val tempM4b = File(workDir, m4bFileName)
+
+                    val (coverBytes, savedCoverPath) = resolveCoverArtBytes(config, workDir)
 
                     updateDualNotification(
-                        chapterTitle = "Combining M4A chapters & metadata...",
+                        chapterTitle = "Encoding M4B audiobook & chapter timestamps...",
                         chapterPercent = 5,
                         currentChapterNum = total,
                         totalChapters = total,
-                        batchPercent = 96,
+                        batchPercent = 90,
                         exportedCount = exportedCount
                     )
 
-                    val m4aOk = M4aAudiobookBuilder.buildChapteredM4a(
-                        chapters = generatedMp3Inputs,
-                        outputM4aFile = tempM4a,
+                    val buildResult = M4aAudiobookBuilder.buildChapteredM4bFromWavs(
+                        chapters = m4bChapterGroups,
+                        outputM4bFile = tempM4b,
                         metadata = config.m4aMetadata,
                         coverBytes = coverBytes,
                         onProgress = { pct ->
                             updateDualNotification(
-                                chapterTitle = "Combining M4A chapters & metadata...",
+                                chapterTitle = "Encoding M4B audiobook & sync alignment...",
                                 chapterPercent = pct,
                                 currentChapterNum = total,
                                 totalChapters = total,
-                                batchPercent = 96 + (pct * 4 / 100),
+                                batchPercent = 90 + (pct * 10 / 100),
                                 exportedCount = exportedCount
                             )
                         }
                     )
-                    if (m4aOk) {
-                        writeFileToSafFolder(outputTree, tempM4a, "audio/mp4", m4aFileName)
-                        m4aOutputName = m4aFileName
+
+                    if (buildResult.success) {
+                        val destUri = writeFileToSafFolder(outputTree, tempM4b, "audio/mp4", m4bFileName)
+                        if (destUri != null) {
+                            val app = applicationContext as LexiVoiceApplication
+                            val segments = if (config.m4aMetadata.syncWithEpub && config.bookFileKey.isNotBlank()) {
+                                buildResult.syncSegments
+                            } else {
+                                emptyList()
+                            }
+                            app.audiobookRepository.registerExportedM4b(
+                                fileUri = destUri.toString(),
+                                title = config.m4aMetadata.title.ifBlank { config.sourceTitle },
+                                author = config.m4aMetadata.author.ifBlank { "Unknown Author" },
+                                narrator = config.m4aMetadata.narrator.ifBlank { "LexiVoice TTS" },
+                                year = config.m4aMetadata.year,
+                                genre = config.m4aMetadata.genre,
+                                coverPath = savedCoverPath ?: config.coverPath,
+                                durationMs = buildResult.totalDurationMs,
+                                chapters = buildResult.chapterMetas,
+                                sourceEpubKey = config.bookFileKey.takeIf { it.isNotBlank() && config.m4aMetadata.syncWithEpub },
+                                sourceEpubIsDirect = config.isDirectPath,
+                                syncSegments = segments
+                            )
+                        }
+                        m4bOutputName = m4bFileName
                         exportedCount++
                     }
                 }
@@ -275,7 +382,7 @@ class AudioExportService : Service() {
                         currentChapterProgressPercent = 100,
                         batchProgressPercent = 100,
                         exportedFilesCount = exportedCount,
-                        m4aCreatedName = m4aOutputName
+                        m4aCreatedName = m4bOutputName
                     )
                 }
 
@@ -306,6 +413,54 @@ class AudioExportService : Service() {
                 stopSelf()
             }
         }
+    }
+
+    private fun resolveCoverArtBytes(config: ExportBatchConfig, workDir: File): Pair<ByteArray?, String?> {
+        if (!config.m4aMetadata.includeCover) return null to null
+
+        val overrideUri = config.m4aMetadata.coverOverrideUri
+        if (!overrideUri.isNullOrBlank()) {
+            val bytes = runCatching {
+                contentResolver.openInputStream(Uri.parse(overrideUri))?.use { input ->
+                    normalizeToJpeg(input.readBytes())
+                }
+            }.getOrNull()
+            if (bytes != null) {
+                val coversDir = File(filesDir, "covers").apply { mkdirs() }
+                val savedFile = File(coversDir, "custom_cover_${System.currentTimeMillis()}.jpg")
+                FileOutputStream(savedFile).use { it.write(bytes) }
+                return bytes to savedFile.absolutePath
+            }
+        }
+
+        val epubCover = config.coverPath?.let { path ->
+            runCatching { File(path).takeIf { it.exists() }?.readBytes() }.getOrNull()
+        }
+        return normalizeToJpeg(epubCover) to config.coverPath
+    }
+
+    private fun normalizeToJpeg(raw: ByteArray?): ByteArray? {
+        if (raw == null || raw.isEmpty()) return null
+        return runCatching {
+            val bmp = BitmapFactory.decodeByteArray(raw, 0, raw.size) ?: return raw
+            val maxDim = 800
+            val scale = minOf(1f, maxDim.toFloat() / maxOf(bmp.width, bmp.height).coerceAtLeast(1))
+            val scaled = if (scale < 0.99f) {
+                Bitmap.createScaledBitmap(
+                    bmp,
+                    (bmp.width * scale).toInt().coerceAtLeast(1),
+                    (bmp.height * scale).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                bmp
+            }
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 88, out)
+            if (scaled !== bmp) scaled.recycle()
+            bmp.recycle()
+            out.toByteArray()
+        }.getOrDefault(raw)
     }
 
     private suspend fun initExportTts(config: ExportBatchConfig): Boolean = withContext(Dispatchers.Main) {
@@ -386,7 +541,6 @@ class AudioExportService : Service() {
                 current.setLength(0)
             }
             if (sentence.length > maxChunkChars) {
-                // Hard split overly long run-on sentences cleanly on spaces
                 var pos = 0
                 while (pos < sentence.length) {
                     val sliceEnd = (pos + maxChunkChars).coerceAtMost(sentence.length)
@@ -413,14 +567,15 @@ class AudioExportService : Service() {
         sourceFile: File,
         mimeType: String,
         displayName: String
-    ) {
+    ): Uri? {
         folderDoc.findFile(displayName)?.delete()
-        val destDoc = folderDoc.createFile(mimeType, displayName) ?: return
+        val destDoc = folderDoc.createFile(mimeType, displayName) ?: return null
         contentResolver.openOutputStream(destDoc.uri)?.use { out ->
             FileInputStream(sourceFile).use { input ->
                 input.copyTo(out, bufferSize = 32 * 1024)
             }
         }
+        return destDoc.uri
     }
 
     private fun sanitizeFileName(raw: String): String {

@@ -6,7 +6,10 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Xml
 import org.jsoup.Jsoup
+import org.jsoup.nodes.DataNode
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
 import org.xmlpull.v1.XmlPullParser
 import java.io.File
 import java.io.FileOutputStream
@@ -18,9 +21,11 @@ import java.text.BreakIterator
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
-import java.util.zip.ZipInputStream
 
 object EpubParser {
+
+    const val ASSET_HOST = "appassets.androidplatform.net"
+    const val ASSET_BASE_URL = "https://$ASSET_HOST/epub/"
 
     private data class OpfInfo(
         val title: String,
@@ -40,6 +45,21 @@ object EpubParser {
         val properties: String
     )
 
+    data class WebChapterPayload(
+        val chapterIndex: Int,
+        val chapterTitle: String,
+        val baseUrl: String,
+        val htmlWithSentenceSpans: String,
+        val sentences: List<ReaderSentence>,
+        val paragraphs: List<ReaderParagraph>,
+        val plainText: String
+    )
+
+    data class ZipResourceData(
+        val bytes: ByteArray,
+        val mimeType: String
+    )
+
     fun extractMetadataForIndexing(
         context: Context,
         fileKey: String,
@@ -52,8 +72,6 @@ object EpubParser {
                     extractMetadataFromZip(context, fileKey, zip, fallbackFileName)
                 }
             } else {
-                // Copy to a small temporary file only if needed or stream via ZipInputStream;
-                // copying to cache once is fast and allows random-access ZipFile without reading all HTML!
                 val tempFile = copyUriToTemp(context, Uri.parse(fileKey))
                     ?: return defaultMetadata(fallbackFileName)
                 try {
@@ -152,6 +170,225 @@ object EpubParser {
         }
     }
 
+    /**
+     * Prepares a chapter for WebView rendering with full original CSS/images preserved AND
+     * every sentence wrapped in `<span class="lexi-s" data-idx="N">` for live highlighting & tapping.
+     */
+    fun loadChapterForWebView(
+        context: Context,
+        fileKey: String,
+        isDirectPath: Boolean,
+        chapterIndex: Int,
+        chapterHref: String,
+        chapterTitle: String
+    ): WebChapterPayload {
+        val localZipFile = resolveReadableZipFile(context, fileKey, isDirectPath)
+            ?: return emptyWebPayload(chapterIndex, chapterTitle, chapterHref)
+        val shouldDelete = !isDirectPath
+        return try {
+            ZipFile(localZipFile).use { zip ->
+                val entry = getZipEntryIgnoreCase(zip, chapterHref)
+                    ?: return emptyWebPayload(chapterIndex, chapterTitle, chapterHref)
+                val rawHtml = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
+                buildWebChapterPayload(chapterIndex, chapterTitle, chapterHref, rawHtml)
+            }
+        } catch (_: Exception) {
+            emptyWebPayload(chapterIndex, chapterTitle, chapterHref)
+        } finally {
+            if (shouldDelete) localZipFile.delete()
+        }
+    }
+
+    fun buildWebChapterPayload(
+        chapterIndex: Int,
+        chapterTitle: String,
+        chapterHref: String,
+        rawHtml: String
+    ): WebChapterPayload {
+        val doc = Jsoup.parse(rawHtml)
+        doc.outputSettings().prettyPrint(false)
+
+        val chapterDir = chapterHref.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
+        val baseUrl = "$ASSET_BASE_URL$chapterDir"
+
+        // Ensure head exists and inject base + non-destructive reader CSS hooks
+        val head = doc.head()
+        if (head.selectFirst("meta[name=viewport]") == null) {
+            head.prependElement("meta")
+                .attr("name", "viewport")
+                .attr("content", "width=device-width, initial-scale=1.0, maximum-scale=3.0")
+        }
+
+        val sentences = mutableListOf<ReaderSentence>()
+        val paragraphs = mutableListOf<ReaderParagraph>()
+        val plainBlocks = mutableListOf<String>()
+
+        var globalSentenceIdx = 0
+        var paraIdx = 0
+
+        val body = doc.body()
+        // Walk all text nodes in DOM order, skipping script/style/svg/title
+        val skipTags = setOf("script", "style", "svg", "title", "noscript")
+        val textNodes = mutableListOf<TextNode>()
+
+        fun collectTextNodes(node: Node) {
+            if (node is Element && node.tagName().lowercase(Locale.ROOT) in skipTags) return
+            if (node is TextNode) {
+                if (!node.isBlank) textNodes.add(node)
+                return
+            }
+            for (child in node.childNodes()) {
+                collectTextNodes(child)
+            }
+        }
+        collectTextNodes(body)
+
+        // Group text nodes by nearest block container so paragraph context is preserved for TTS & overlay
+        val blockTags = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "pre", "div", "section")
+        fun nearestBlock(node: Node): Element {
+            var curr = node.parent()
+            while (curr is Element && curr != body) {
+                if (curr.tagName().lowercase(Locale.ROOT) in blockTags) return curr
+                curr = curr.parent()
+            }
+            return body
+        }
+
+        val groupedByBlock = linkedMapOf<Element, MutableList<TextNode>>()
+        for (tn in textNodes) {
+            groupedByBlock.getOrPut(nearestBlock(tn)) { mutableListOf() }.add(tn)
+        }
+
+        for ((blockEl, nodes) in groupedByBlock) {
+            val blockText = blockEl.text().replace(Regex("\\s+"), " ").trim()
+            if (blockText.isNotBlank()) plainBlocks.add(blockText)
+
+            val blockSentences = mutableListOf<ReaderSentence>()
+            var offsetInPara = 0
+            for (tn in nodes) {
+                val rawText = tn.wholeText
+                val split = splitPreservingWhitespace(rawText)
+                if (split.isEmpty()) continue
+
+                val replacementNodes = mutableListOf<Node>()
+                for ((isSentence, chunk) in split) {
+                    if (!isSentence) {
+                        replacementNodes.add(TextNode(chunk))
+                    } else {
+                        val sIdx = globalSentenceIdx++
+                        val cleanText = chunk.replace(Regex("\\s+"), " ").trim()
+                        val startPos = offsetInPara
+                        offsetInPara += cleanText.length + 1
+                        val sentenceObj = ReaderSentence(
+                            globalIndex = sIdx,
+                            paragraphIndex = paraIdx,
+                            startInParagraph = startPos,
+                            endInParagraph = startPos + cleanText.length,
+                            text = cleanText
+                        )
+                        sentences.add(sentenceObj)
+                        blockSentences.add(sentenceObj)
+
+                        val span = Element("span")
+                            .addClass("lexi-s")
+                            .attr("data-idx", sIdx.toString())
+                            .attr("onclick", "if(window.LexiBridge){window.LexiBridge.onSentenceTapped($sIdx);}")
+                            .text(chunk)
+                        replacementNodes.add(span)
+                    }
+                }
+                if (replacementNodes.isNotEmpty()) {
+                    for (rep in replacementNodes) {
+                        tn.before(rep)
+                    }
+                    tn.remove()
+                }
+            }
+
+            if (blockSentences.isNotEmpty()) {
+                val tag = blockEl.tagName().lowercase(Locale.ROOT)
+                val hLevel = if (tag.startsWith("h") && tag.length == 2) tag[1].digitToIntOrNull() ?: 0 else 0
+                paragraphs.add(
+                    ReaderParagraph(
+                        index = paraIdx++,
+                        text = blockText,
+                        isHeading = hLevel > 0,
+                        headingLevel = hLevel,
+                        sentences = blockSentences
+                    )
+                )
+            }
+        }
+
+        // Inject JS helper for highlighting and auto-scrolling cleanly inside WebView
+        body.appendChild(
+            Element("script").appendChild(
+                DataNode(
+                    """
+                    (function(){
+                      window.lexiHighlightSentence = function(idx, shouldScroll) {
+                        var prev = document.querySelectorAll('.lexi-s.lexi-active');
+                        for (var i = 0; i < prev.length; i++) {
+                          prev[i].classList.remove('lexi-active');
+                        }
+                        if (idx < 0) return;
+                        var target = document.querySelector('.lexi-s[data-idx="' + idx + '"]');
+                        if (target) {
+                          target.classList.add('lexi-active');
+                          if (shouldScroll) {
+                            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          }
+                        }
+                      };
+                    })();
+                    """.trimIndent()
+                )
+            )
+        )
+
+        return WebChapterPayload(
+            chapterIndex = chapterIndex,
+            chapterTitle = chapterTitle,
+            baseUrl = baseUrl,
+            htmlWithSentenceSpans = doc.outerHtml(),
+            sentences = sentences,
+            paragraphs = paragraphs,
+            plainText = plainBlocks.joinToString("\n\n")
+        )
+    }
+
+    /**
+     * Reads internal CSS, image, SVG, or font resources directly from an EPUB Zip archive
+     * for WebView's `shouldInterceptRequest`.
+     */
+    fun readZipResource(zip: ZipFile, requestUrl: String): ZipResourceData? {
+        if (!requestUrl.startsWith(ASSET_BASE_URL)) return null
+        val relPath = decodeHref(requestUrl.removePrefix(ASSET_BASE_URL).substringBefore('?').substringBefore('#'))
+        val normalized = normalizePath(relPath)
+        val entry = getZipEntryIgnoreCase(zip, normalized) ?: return null
+        val bytes = zip.getInputStream(entry).use { it.readBytes() }
+        return ZipResourceData(bytes = bytes, mimeType = guessMimeType(normalized))
+    }
+
+    private fun guessMimeType(path: String): String {
+        val lower = path.lowercase(Locale.ROOT)
+        return when {
+            lower.endsWith(".css") -> "text/css"
+            lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm") -> "application/xhtml+xml"
+            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg"
+            lower.endsWith(".png") -> "image/png"
+            lower.endsWith(".gif") -> "image/gif"
+            lower.endsWith(".webp") -> "image/webp"
+            lower.endsWith(".svg") -> "image/svg+xml"
+            lower.endsWith(".ttf") -> "font/ttf"
+            lower.endsWith(".otf") -> "font/otf"
+            lower.endsWith(".woff") -> "font/woff"
+            lower.endsWith(".woff2") -> "font/woff2"
+            lower.endsWith(".js") -> "application/javascript"
+            else -> "application/octet-stream"
+        }
+    }
+
     fun loadChapterContent(
         context: Context,
         fileKey: String,
@@ -160,18 +397,44 @@ object EpubParser {
         chapterHref: String,
         chapterTitle: String
     ): EpubChapterContent {
-        val localZipFile = resolveReadableZipFile(context, fileKey, isDirectPath)
-            ?: return EpubChapterContent(chapterIndex, chapterTitle, emptyList(), emptyList(), "")
+        val webPayload = loadChapterForWebView(
+            context = context,
+            fileKey = fileKey,
+            isDirectPath = isDirectPath,
+            chapterIndex = chapterIndex,
+            chapterHref = chapterHref,
+            chapterTitle = chapterTitle
+        )
+        return EpubChapterContent(
+            index = chapterIndex,
+            title = chapterTitle,
+            paragraphs = webPayload.paragraphs,
+            sentences = webPayload.sentences,
+            plainText = webPayload.plainText
+        )
+    }
+
+    fun loadAllChapterSentencesForExport(
+        context: Context,
+        fileKey: String,
+        isDirectPath: Boolean,
+        chapters: List<EpubChapterSummary>
+    ): Map<Int, List<ReaderSentence>> {
+        val localZipFile = resolveReadableZipFile(context, fileKey, isDirectPath) ?: return emptyMap()
         val shouldDelete = !isDirectPath
         return try {
             ZipFile(localZipFile).use { zip ->
-                val entry = getZipEntryIgnoreCase(zip, chapterHref)
-                    ?: return EpubChapterContent(chapterIndex, chapterTitle, emptyList(), emptyList(), "")
-                val html = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
-                parseHtmlToChapterContent(chapterIndex, chapterTitle, html)
+                val result = linkedMapOf<Int, List<ReaderSentence>>()
+                for (chapter in chapters) {
+                    val entry = getZipEntryIgnoreCase(zip, chapter.href) ?: continue
+                    val html = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
+                    val payload = buildWebChapterPayload(chapter.index, chapter.title, chapter.href, html)
+                    result[chapter.index] = payload.sentences
+                }
+                result
             }
         } catch (_: Exception) {
-            EpubChapterContent(chapterIndex, chapterTitle, emptyList(), emptyList(), "")
+            emptyMap()
         } finally {
             if (shouldDelete) localZipFile.delete()
         }
@@ -191,10 +454,7 @@ object EpubParser {
                 for (chapter in chapters) {
                     val entry = getZipEntryIgnoreCase(zip, chapter.href) ?: continue
                     val html = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
-                    val parsed = parseHtmlToChapterContent(chapter.index, chapter.title, html)
-                    if (parsed.plainText.isNotBlank()) {
-                        result[chapter.index] = parsed.plainText
-                    }
+                    result[chapter.index] = Jsoup.parse(html).body().text()
                 }
                 result
             }
@@ -239,68 +499,28 @@ object EpubParser {
         )
     }
 
-    private fun parseHtmlToChapterContent(
-        chapterIndex: Int,
-        chapterTitle: String,
-        html: String
-    ): EpubChapterContent {
-        val doc = Jsoup.parse(html)
-        doc.select("script, style, svg, nav[epub\\:type=page-list], head").remove()
-
-        val body = doc.body()
-        val blockElements = body.select("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre")
-        val rawBlocks = mutableListOf<Pair<String, Int>>() // text, headingLevel (0 = normal)
-
-        if (blockElements.isNotEmpty()) {
-            val seenElements = HashSet<Element>()
-            for (el in blockElements) {
-                // Skip nested blocks whose parent was already captured as a paragraph/heading
-                if (el.parents().any { it in seenElements }) continue
-                val text = el.text().replace(Regex("\\s+"), " ").trim()
-                if (text.isNotBlank()) {
-                    seenElements.add(el)
-                    val tag = el.tagName().lowercase(Locale.ROOT)
-                    val headingLevel = if (tag.startsWith("h") && tag.length == 2) {
-                        tag[1].digitToIntOrNull() ?: 0
-                    } else 0
-                    rawBlocks.add(text to headingLevel)
-                }
+    private fun splitPreservingWhitespace(text: String): List<Pair<Boolean, String>> {
+        if (text.isBlank()) return listOf(false to text)
+        val iterator = BreakIterator.getSentenceInstance(Locale.getDefault())
+        iterator.setText(text)
+        val out = mutableListOf<Pair<Boolean, String>>()
+        var start = iterator.first()
+        var end = iterator.next()
+        while (end != BreakIterator.DONE) {
+            val slice = text.substring(start, end)
+            val firstNonWs = slice.indexOfFirst { !it.isWhitespace() }
+            val lastNonWs = slice.indexOfLast { !it.isWhitespace() }
+            if (firstNonWs < 0) {
+                out.add(false to slice)
+            } else {
+                if (firstNonWs > 0) out.add(false to slice.substring(0, firstNonWs))
+                out.add(true to slice.substring(firstNonWs, lastNonWs + 1))
+                if (lastNonWs + 1 < slice.length) out.add(false to slice.substring(lastNonWs + 1))
             }
+            start = end
+            end = iterator.next()
         }
-
-        if (rawBlocks.isEmpty()) {
-            val fallback = body.text().replace(Regex("\\s+"), " ").trim()
-            if (fallback.isNotBlank()) {
-                rawBlocks.add(fallback to 0)
-            }
-        }
-
-        val paragraphs = mutableListOf<ReaderParagraph>()
-        val allSentences = mutableListOf<ReaderSentence>()
-        var globalSentenceIdx = 0
-
-        rawBlocks.forEachIndexed { pIdx, (text, headingLevel) ->
-            val sentences = splitIntoSentences(text, pIdx, globalSentenceIdx)
-            globalSentenceIdx += sentences.size
-            allSentences.addAll(sentences)
-            paragraphs.add(
-                ReaderParagraph(
-                    index = pIdx,
-                    text = text,
-                    isHeading = headingLevel > 0,
-                    headingLevel = headingLevel,
-                    sentences = sentences
-                )
-            )
-        }
-
-        return EpubChapterContent(
-            index = chapterIndex,
-            title = chapterTitle,
-            paragraphs = paragraphs,
-            sentences = allSentences,
-            plainText = rawBlocks.joinToString("\n\n") { it.first }
-        )
+        return out
     }
 
     fun splitIntoSentences(
@@ -348,6 +568,25 @@ object EpubParser {
             )
         }
         return result
+    }
+
+    fun openReadableZip(context: Context, fileKey: String, isDirectPath: Boolean): Pair<ZipFile, File?>? {
+        val file = resolveReadableZipFile(context, fileKey, isDirectPath) ?: return null
+        return runCatching {
+            ZipFile(file) to (if (isDirectPath) null else file)
+        }.getOrNull()
+    }
+
+    private fun emptyWebPayload(chapterIndex: Int, chapterTitle: String, chapterHref: String): WebChapterPayload {
+        return WebChapterPayload(
+            chapterIndex = chapterIndex,
+            chapterTitle = chapterTitle,
+            baseUrl = "$ASSET_BASE_URL${chapterHref.substringBeforeLast('/', "")}",
+            htmlWithSentenceSpans = "<html><body><p>Unable to render chapter.</p></body></html>",
+            sentences = emptyList(),
+            paragraphs = emptyList(),
+            plainText = ""
+        )
     }
 
     private fun findOpfPath(zip: ZipFile): String? {
@@ -467,7 +706,6 @@ object EpubParser {
     private fun buildTocTitleMap(zip: ZipFile, opf: OpfInfo): Map<String, String> {
         val map = linkedMapOf<String, String>()
 
-        // EPUB 3 Nav document first
         opf.navHref?.let { navHref ->
             val navPath = resolvePath(opf.opfDir, navHref)
             val navDir = navPath.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
@@ -489,7 +727,6 @@ object EpubParser {
             }
         }
 
-        // EPUB 2 NCX fallback / supplement
         if (map.isEmpty() && opf.ncxHref != null) {
             val ncxPath = resolvePath(opf.opfDir, opf.ncxHref)
             val ncxDir = ncxPath.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }

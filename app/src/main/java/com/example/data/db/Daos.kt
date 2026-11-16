@@ -171,3 +171,27 @@ interface BookDao {
         return observeFilteredBooks(SimpleSQLiteQuery(sql, args.toTypedArray()))
     }
 }
+
+@Dao
+interface AudiobookDao {
+    @Query("SELECT * FROM audiobooks ORDER BY CASE WHEN lastPlayedAt > 0 THEN 0 ELSE 1 END, lastPlayedAt DESC, addedAt DESC")
+    fun observeAllAudiobooks(): Flow<List<AudiobookEntity>>
+
+    @Query("SELECT * FROM audiobooks WHERE id = :id LIMIT 1")
+    suspend fun getAudiobookById(id: Long): AudiobookEntity?
+
+    @Query("SELECT * FROM audiobooks WHERE id = :id LIMIT 1")
+    fun observeAudiobookById(id: Long): Flow<AudiobookEntity?>
+
+    @Query("SELECT * FROM audiobooks WHERE fileUri = :fileUri LIMIT 1")
+    suspend fun getAudiobookByUri(fileUri: String): AudiobookEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAudiobook(entity: AudiobookEntity): Long
+
+    @Query("UPDATE audiobooks SET lastPositionMs = :positionMs, lastPlayedAt = :playedAt WHERE id = :id")
+    suspend fun updatePlaybackProgress(id: Long, positionMs: Long, playedAt: Long)
+
+    @Query("DELETE FROM audiobooks WHERE id = :id")
+    suspend fun deleteAudiobook(id: Long)
+}

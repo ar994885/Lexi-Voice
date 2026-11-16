@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.work.Configuration
 import com.example.data.db.LexiDatabase
 import com.example.data.prefs.PreferencesRepository
+import com.example.data.repo.AudiobookRepository
 import com.example.data.repo.LibraryRepository
 import com.example.library.FolderSyncWorker
 
@@ -19,6 +20,13 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
         LibraryRepository(
             context = this,
             bookDao = database.bookDao(),
+            folderDao = database.folderDao()
+        )
+    }
+    val audiobookRepository: AudiobookRepository by lazy {
+        AudiobookRepository(
+            context = this,
+            audiobookDao = database.audiobookDao(),
             folderDao = database.folderDao()
         )
     }
@@ -54,17 +62,28 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
                 getString(R.string.notification_channel_export),
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Real-time dual progress notifications for MP3 and M4A chapter export"
+                description = "Real-time dual progress notifications for MP3 and M4B audiobook export"
+                setShowBadge(false)
+            }
+
+            val m4bChannel = NotificationChannel(
+                CHANNEL_M4B_PLAYBACK,
+                getString(R.string.notification_channel_m4b),
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Background playback controls for M4B audiobooks"
                 setShowBadge(false)
             }
 
             manager.createNotificationChannel(ttsChannel)
             manager.createNotificationChannel(exportChannel)
+            manager.createNotificationChannel(m4bChannel)
         }
     }
 
     companion object {
         const val CHANNEL_TTS_PLAYBACK = "lexivoice_tts_playback"
         const val CHANNEL_AUDIO_EXPORT = "lexivoice_audio_export"
+        const val CHANNEL_M4B_PLAYBACK = "lexivoice_m4b_playback"
     }
 }

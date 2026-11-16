@@ -46,3 +46,33 @@ data class BookEntity(
     val scrollOffset: Int = 0,
     val progressPercent: Float = 0f
 )
+
+@Entity(
+    tableName = "audiobooks",
+    indices = [
+        Index(value = ["fileUri"], unique = true),
+        Index(value = ["lastPlayedAt"]),
+        Index(value = ["addedAt"])
+    ]
+)
+data class AudiobookEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    val fileUri: String,
+    val isDirectPath: Boolean,
+    val title: String,
+    val author: String,
+    val narrator: String = "LexiVoice TTS",
+    val year: String = "",
+    val genre: String = "Audiobook",
+    val coverPath: String? = null,
+    val durationMs: Long = 0L,
+    val chapterCount: Int = 0,
+    val chaptersJson: String = "[]",
+    val sourceEpubKey: String? = null,
+    val sourceEpubIsDirect: Boolean = false,
+    val syncJsonPath: String? = null,
+    val lastPositionMs: Long = 0L,
+    val lastPlayedAt: Long = 0L,
+    val addedAt: Long = System.currentTimeMillis()
+)

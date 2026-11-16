@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import com.example.LexiVoiceApplication
 import com.example.data.db.BookEntity
 import com.example.data.prefs.ReaderSettings
-import com.example.epub.EpubChapterContent
 import com.example.epub.EpubChapterSummary
 import com.example.epub.EpubParser
 import com.example.tts.TtsPlaybackService
@@ -27,7 +26,7 @@ data class ReaderUiState(
     val book: BookEntity? = null,
     val chapters: List<EpubChapterSummary> = emptyList(),
     val currentChapterIndex: Int = 0,
-    val chapterContent: EpubChapterContent? = null,
+    val webChapterPayload: EpubParser.WebChapterPayload? = null,
     val errorMessage: String? = null
 )
 
@@ -71,8 +70,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             val targetChapterIdx = book.currentChapterIndex.coerceIn(0, chapters.lastIndex)
-            val content = withContext(Dispatchers.IO) {
-                EpubParser.loadChapterContent(
+            val payload = withContext(Dispatchers.IO) {
+                EpubParser.loadChapterForWebView(
                     context = app,
                     fileKey = book.fileKey,
                     isDirectPath = book.isDirectPath,
@@ -87,7 +86,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 book = book,
                 chapters = chapters,
                 currentChapterIndex = targetChapterIdx,
-                chapterContent = content
+                webChapterPayload = payload
             )
 
             libraryRepo.updateReadingProgress(
@@ -98,10 +97,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 totalChapters = chapters.size
             )
 
-            // Sync session content if TTS isn't playing a different book
             val ttsState = TtsStateHolder.state.value
             if (!ttsState.isPlaying || ttsState.bookId == book.id) {
-                pushSessionToTts(book, chapters, targetChapterIdx, content)
+                pushSessionToTts(book, chapters, targetChapterIdx, payload)
             }
         }
     }
@@ -111,10 +109,14 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         val book = current.book ?: return
         if (chapterIndex !in current.chapters.indices) return
 
+        val ttsState = TtsStateHolder.state.value
+        val wasPlayingThisBook = ttsState.isPlaying && ttsState.sourceType == TtsSourceType.BOOK && ttsState.bookId == book.id
+        val autoSpeakSentence = startPlayingFromSentence ?: if (wasPlayingThisBook) 0 else null
+
         viewModelScope.launch {
             val summary = current.chapters[chapterIndex]
-            val content = withContext(Dispatchers.IO) {
-                EpubParser.loadChapterContent(
+            val payload = withContext(Dispatchers.IO) {
+                EpubParser.loadChapterForWebView(
                     context = app,
                     fileKey = book.fileKey,
                     isDirectPath = book.isDirectPath,
@@ -125,19 +127,19 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             }
             _uiState.value = current.copy(
                 currentChapterIndex = chapterIndex,
-                chapterContent = content
+                webChapterPayload = payload
             )
             libraryRepo.updateReadingProgress(
                 bookId = book.id,
                 chapterIndex = chapterIndex,
-                sentenceIndex = startPlayingFromSentence ?: 0,
+                sentenceIndex = autoSpeakSentence ?: 0,
                 scrollOffset = 0,
                 totalChapters = current.chapters.size
             )
-            pushSessionToTts(book, current.chapters, chapterIndex, content)
-            if (startPlayingFromSentence != null) {
+            pushSessionToTts(book, current.chapters, chapterIndex, payload)
+            if (autoSpeakSentence != null) {
                 TtsPlaybackService.sendAction(app, TtsPlaybackService.ACTION_PLAY_BOOK) {
-                    putExtra(TtsPlaybackService.EXTRA_SENTENCE_INDEX, startPlayingFromSentence)
+                    putExtra(TtsPlaybackService.EXTRA_SENTENCE_INDEX, autoSpeakSentence)
                 }
             }
         }
@@ -149,8 +151,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         if (ttsChapterIndex !in current.chapters.indices) return
         viewModelScope.launch {
             val summary = current.chapters[ttsChapterIndex]
-            val content = withContext(Dispatchers.IO) {
-                EpubParser.loadChapterContent(
+            val payload = withContext(Dispatchers.IO) {
+                EpubParser.loadChapterForWebView(
                     context = app,
                     fileKey = current.book.fileKey,
                     isDirectPath = current.book.isDirectPath,
@@ -161,7 +163,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             }
             _uiState.value = _uiState.value.copy(
                 currentChapterIndex = ttsChapterIndex,
-                chapterContent = content
+                webChapterPayload = payload
             )
         }
     }
@@ -169,8 +171,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     fun playFromSentence(sentenceIndex: Int) {
         val current = _uiState.value
         val book = current.book ?: return
-        val content = current.chapterContent ?: return
-        pushSessionToTts(book, current.chapters, current.currentChapterIndex, content)
+        val payload = current.webChapterPayload ?: return
+        pushSessionToTts(book, current.chapters, current.currentChapterIndex, payload)
         TtsPlaybackService.sendAction(app, TtsPlaybackService.ACTION_PLAY_BOOK) {
             putExtra(TtsPlaybackService.EXTRA_SENTENCE_INDEX, sentenceIndex)
         }
@@ -202,7 +204,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         book: BookEntity,
         chapters: List<EpubChapterSummary>,
         chapterIdx: Int,
-        content: EpubChapterContent
+        payload: EpubParser.WebChapterPayload
     ) {
         TtsStateHolder.setSessionContent(
             TtsSessionContent(
@@ -213,8 +215,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 isDirectPath = book.isDirectPath,
                 chapters = chapters,
                 currentChapterIndex = chapterIdx,
-                paragraphs = content.paragraphs,
-                sentences = content.sentences
+                paragraphs = payload.paragraphs,
+                sentences = payload.sentences
             )
         )
         if (TtsStateHolder.state.value.sourceType == TtsSourceType.NONE) {

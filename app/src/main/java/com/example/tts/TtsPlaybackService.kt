@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -21,18 +20,15 @@ import android.speech.tts.UtteranceProgressListener
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
-import android.text.SpannableString
-import android.text.Spanned
-import android.text.style.BackgroundColorSpan
-import android.text.style.StyleSpan
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -69,22 +65,22 @@ class TtsPlaybackService : Service() {
     private var currentUtteranceId: String = ""
     private var pendingSpeakAfterInit: Boolean = false
 
-    // System overlay floating popup views
+    // Compact T2S-style System Floating Overlay Views
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
-    private var overlayParagraphTv: TextView? = null
-    private var overlayPlayBtn: Button? = null
+    private var overlaySentenceTv: TextView? = null
+    private var overlayPlayBtn: ImageButton? = null
     private var overlayExpandedContainer: LinearLayout? = null
-    private var overlayMinimizedPill: TextView? = null
+    private var overlayEdgeTab: LinearLayout? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+    private var savedExpandedX: Int = 0
+    private var savedExpandedY: Int = 0
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // Keep speaking quietly or pause cleanly
-            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> Unit
         }
     }
 
@@ -173,32 +169,36 @@ class TtsPlaybackService : Service() {
                 val rate = intent.getFloatExtra(EXTRA_FLOAT, 1.0f).coerceIn(0.5f, 3.0f)
                 TtsStateHolder.updateState { it.copy(speechRate = rate) }
                 tts?.setSpeechRate(rate)
-                if (TtsStateHolder.state.value.isPlaying) {
-                    speakCurrentSentence()
-                }
+                if (TtsStateHolder.state.value.isPlaying) speakCurrentSentence()
             }
             ACTION_SET_PITCH -> {
                 val pitch = intent.getFloatExtra(EXTRA_FLOAT, 1.0f).coerceIn(0.5f, 2.0f)
                 TtsStateHolder.updateState { it.copy(pitch = pitch) }
                 tts?.setPitch(pitch)
-                if (TtsStateHolder.state.value.isPlaying) {
-                    speakCurrentSentence()
-                }
+                if (TtsStateHolder.state.value.isPlaying) speakCurrentSentence()
             }
             ACTION_SET_ENGINE -> {
                 val pkg = intent.getStringExtra(EXTRA_STRING).orEmpty()
                 TtsStateHolder.updateState {
-                    it.copy(selectedEnginePackage = pkg, selectedVoiceName = "", isEngineReady = false)
+                    it.copy(
+                        selectedEnginePackage = pkg,
+                        selectedVoiceName = "",
+                        selectedLocaleTag = "",
+                        isEngineReady = false
+                    )
                 }
                 initTts(pkg.ifBlank { null })
+            }
+            ACTION_SET_LANGUAGE -> {
+                val localeTag = intent.getStringExtra(EXTRA_LOCALE).orEmpty()
+                applyLanguageSelection(localeTag)
+                if (TtsStateHolder.state.value.isPlaying) speakCurrentSentence()
             }
             ACTION_SET_VOICE -> {
                 val voiceName = intent.getStringExtra(EXTRA_STRING).orEmpty()
                 val localeTag = intent.getStringExtra(EXTRA_LOCALE).orEmpty()
                 applyVoiceSelection(voiceName, localeTag)
-                if (TtsStateHolder.state.value.isPlaying) {
-                    speakCurrentSentence()
-                }
+                if (TtsStateHolder.state.value.isPlaying) speakCurrentSentence()
             }
             ACTION_SET_SLEEP_TIMER -> {
                 val modeName = intent.getStringExtra(EXTRA_STRING) ?: SleepTimerMode.OFF.name
@@ -256,15 +256,24 @@ class TtsPlaybackService : Service() {
                         }
                 }.getOrDefault(emptyList())
 
+                val languages = buildLanguageOptions(engine, voices)
+
                 val st = TtsStateHolder.state.value
+                val defaultTag = Locale.getDefault().toLanguageTag()
+                val resolvedLocaleTag = st.selectedLocaleTag.takeIf { tag ->
+                    tag.isNotBlank() && languages.any { it.localeTag.equals(tag, ignoreCase = true) }
+                } ?: languages.firstOrNull { it.localeTag.equals(defaultTag, ignoreCase = true) }?.localeTag
+                    ?: languages.firstOrNull { it.localeTag.startsWith("en", ignoreCase = true) }?.localeTag
+                    ?: languages.firstOrNull()?.localeTag
+                    ?: defaultTag
+
                 engine.setSpeechRate(st.speechRate)
                 engine.setPitch(st.pitch)
 
-                if (st.selectedVoiceName.isNotBlank()) {
-                    applyVoiceOnEngine(engine, st.selectedVoiceName, st.selectedLocaleTag)
-                } else {
-                    val defaultLocale = Locale.getDefault()
-                    engine.language = defaultLocale
+                if (st.selectedVoiceName.isNotBlank() && voices.any { it.name == st.selectedVoiceName }) {
+                    applyVoiceOnEngine(engine, st.selectedVoiceName, resolvedLocaleTag)
+                } else if (resolvedLocaleTag.isNotBlank()) {
+                    engine.language = Locale.forLanguageTag(resolvedLocaleTag)
                 }
 
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -272,9 +281,7 @@ class TtsPlaybackService : Service() {
 
                     override fun onDone(utteranceId: String?) {
                         if (utteranceId == currentUtteranceId) {
-                            serviceScope.launch {
-                                handleSentenceFinished()
-                            }
+                            serviceScope.launch { handleSentenceFinished() }
                         }
                     }
 
@@ -296,7 +303,9 @@ class TtsPlaybackService : Service() {
                     it.copy(
                         isEngineReady = true,
                         selectedEnginePackage = resolvedPkg,
+                        selectedLocaleTag = resolvedLocaleTag,
                         availableEngines = engines,
+                        availableLanguages = languages,
                         availableVoices = voices,
                         statusMessage = ""
                     )
@@ -324,9 +333,69 @@ class TtsPlaybackService : Service() {
         }
     }
 
+    private fun buildLanguageOptions(
+        engine: TextToSpeech,
+        voices: List<TtsVoiceOption>
+    ): List<TtsLanguageOption> {
+        val voiceCountByTag = voices.groupingBy { it.localeTag }.eachCount()
+        val localeMap = linkedMapOf<String, Locale>()
+
+        voices.forEach { v ->
+            if (v.localeTag.isNotBlank()) {
+                localeMap.putIfAbsent(v.localeTag, Locale.forLanguageTag(v.localeTag))
+            }
+        }
+        runCatching { engine.availableLanguages }.getOrNull()?.forEach { loc ->
+            val tag = loc.toLanguageTag()
+            if (tag.isNotBlank() && tag != "und") {
+                localeMap.putIfAbsent(tag, loc)
+            }
+        }
+
+        val defaultLocale = Locale.getDefault()
+        val defaultTag = defaultLocale.toLanguageTag()
+
+        return localeMap.entries.map { (tag, loc) ->
+            TtsLanguageOption(
+                localeTag = tag,
+                displayName = loc.displayName.ifBlank { tag },
+                voiceCount = voiceCountByTag[tag] ?: 0
+            )
+        }.sortedWith(
+            compareBy<TtsLanguageOption>(
+                { !(it.localeTag.equals(defaultTag, ignoreCase = true)) },
+                { !(it.localeTag.startsWith("en", ignoreCase = true)) },
+                { it.displayName.lowercase(Locale.ROOT) }
+            )
+        )
+    }
+
+    private fun applyLanguageSelection(localeTag: String) {
+        val st = TtsStateHolder.state.value
+        val matchingVoice = st.availableVoices.firstOrNull {
+            it.localeTag.equals(localeTag, ignoreCase = true)
+        }
+        TtsStateHolder.updateState {
+            it.copy(
+                selectedLocaleTag = localeTag,
+                selectedVoiceName = matchingVoice?.name.orEmpty()
+            )
+        }
+        tts?.let { engine ->
+            if (matchingVoice != null) {
+                applyVoiceOnEngine(engine, matchingVoice.name, localeTag)
+            } else if (localeTag.isNotBlank()) {
+                engine.language = Locale.forLanguageTag(localeTag)
+            }
+        }
+    }
+
     private fun applyVoiceSelection(voiceName: String, localeTag: String) {
         TtsStateHolder.updateState {
-            it.copy(selectedVoiceName = voiceName, selectedLocaleTag = localeTag)
+            it.copy(
+                selectedVoiceName = voiceName,
+                selectedLocaleTag = localeTag.ifBlank { it.selectedLocaleTag }
+            )
         }
         tts?.let { applyVoiceOnEngine(it, voiceName, localeTag) }
     }
@@ -737,13 +806,13 @@ class TtsPlaybackService : Service() {
             .setContentIntent(openAppIntent)
             .setOngoing(st.isPlaying)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(android.R.drawable.ic_media_previous, "Back", prevPending)
+            .addAction(android.R.drawable.ic_media_previous, "Previous", prevPending)
             .addAction(
                 if (st.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (st.isPlaying) "Pause" else "Play",
                 playPausePending
             )
-            .addAction(android.R.drawable.ic_media_next, "Front", nextPending)
+            .addAction(android.R.drawable.ic_media_next, "Next", nextPending)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPending)
             .setStyle(
                 MediaStyle()
@@ -763,7 +832,7 @@ class TtsPlaybackService : Service() {
         )
     }
 
-    // --- System Floating Window Overlay (T2S style) ---
+    // --- Compact T2S-Style Floating Overlay Window (~260dp wide, 8dp corners, #E61E1E24, 6dp padding) ---
 
     private fun syncSystemOverlay() {
         val st = TtsStateHolder.state.value
@@ -772,12 +841,12 @@ class TtsPlaybackService : Service() {
             return
         }
         if (overlayView == null) {
-            createSystemOverlayView()
+            createCompactSystemOverlayView()
         }
         updateOverlayContent()
     }
 
-    private fun createSystemOverlayView() {
+    private fun createCompactSystemOverlayView() {
         val wm = windowManager ?: return
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
@@ -785,49 +854,51 @@ class TtsPlaybackService : Service() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#F5171C26"))
-                cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), Color.parseColor("#55F2A164"))
+                setColor(Color.parseColor("#E61E1E24"))
+                cornerRadius = dp(8).toFloat()
+                setStroke(dp(1), Color.parseColor("#33FFFFFF"))
             }
-            elevation = dp(10).toFloat()
+            elevation = dp(8).toFloat()
         }
 
         val expanded = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setPadding(dp(6), dp(6), dp(6), dp(6))
         }
 
-        val headerRow = LinearLayout(this).apply {
+        // Top row: 2-line sentence preview + Edge-Dock Hide + Close (X)
+        val topRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
 
-        val titleTv = TextView(this).apply {
-            text = "LexiVoice Reader"
-            setTextColor(Color.parseColor("#F2A164"))
+        val sentenceTv = TextView(this).apply {
+            setTextColor(Color.parseColor("#F5F5F7"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTypeface(typeface, Typeface.BOLD)
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(4), dp(2), dp(4), dp(2))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
-        val hideBtn = Button(this).apply {
-            text = "Hide"
-            setTextColor(Color.parseColor("#E3DFD6"))
+        val hideBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_dock_hide)
             setBackgroundColor(Color.TRANSPARENT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            minHeight = dp(36)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "Dock to screen edge"
+            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28))
             setOnClickListener {
                 TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = true) }
                 updateOverlayContent()
             }
         }
 
-        val closeBtn = Button(this).apply {
-            text = "Close"
-            setTextColor(Color.parseColor("#F87171"))
+        val closeBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_close_small)
             setBackgroundColor(Color.TRANSPARENT)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            minHeight = dp(36)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "Close overlay"
+            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28))
             setOnClickListener {
                 TtsStateHolder.updateState {
                     it.copy(floatingPopupVisible = false, floatingPopupTemporarilyHidden = false)
@@ -836,74 +907,70 @@ class TtsPlaybackService : Service() {
             }
         }
 
-        headerRow.addView(titleTv)
-        headerRow.addView(hideBtn)
-        headerRow.addView(closeBtn)
+        topRow.addView(sentenceTv)
+        topRow.addView(hideBtn)
+        topRow.addView(closeBtn)
 
-        val scroll = ScrollView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(110)
-            ).apply {
-                topMargin = dp(6)
-                bottomMargin = dp(8)
-            }
-        }
-
-        val paraTv = TextView(this).apply {
-            setTextColor(Color.parseColor("#F4F0E8"))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setLineSpacing(dp(4).toFloat(), 1f)
-        }
-        scroll.addView(paraTv)
-
+        // Bottom row: Compact 36dp x 36dp icon buttons (SkipPrevious, Play/Pause, SkipNext)
         val controlsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
         }
 
-        val backBtn = Button(this).apply {
-            text = "Back"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#2A3242"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f).apply { marginEnd = dp(6) }
+        val prevBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_skip_previous)
+            setBackgroundColor(Color.TRANSPARENT)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "Previous sentence"
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                marginEnd = dp(18)
+            }
             setOnClickListener { previousSentence() }
         }
 
-        val playBtn = Button(this).apply {
-            text = "Play"
-            setTextColor(Color.parseColor("#171C26"))
-            setBackgroundColor(Color.parseColor("#F2A164"))
-            setTypeface(typeface, Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, dp(42), 1.2f).apply { marginEnd = dp(6) }
+        val playBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_play_arrow)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#D97736"))
+            }
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "Play or pause"
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36))
             setOnClickListener {
                 if (TtsStateHolder.state.value.isPlaying) pausePlayback() else resumePlayback()
             }
         }
 
-        val frontBtn = Button(this).apply {
-            text = "Front"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#2A3242"))
-            layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f)
+        val nextBtn = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_skip_next)
+            setBackgroundColor(Color.TRANSPARENT)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            contentDescription = "Next sentence"
+            layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply {
+                marginStart = dp(18)
+            }
             setOnClickListener { nextSentence() }
         }
 
-        controlsRow.addView(backBtn)
+        controlsRow.addView(prevBtn)
         controlsRow.addView(playBtn)
-        controlsRow.addView(frontBtn)
+        controlsRow.addView(nextBtn)
 
-        expanded.addView(headerRow)
-        expanded.addView(scroll)
+        expanded.addView(topRow)
         expanded.addView(controlsRow)
 
-        val minimizedPill = TextView(this).apply {
-            text = "TTS Paused • Tap"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+        // Tiny 32dp x 48dp semi-transparent edge-dock tab when minimized
+        val edgeTab = LinearLayout(this).apply {
+            gravity = Gravity.CENTER
             visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(48))
+            val icon = ImageView(this@TtsPlaybackService).apply {
+                setImageResource(R.drawable.ic_play_arrow)
+                layoutParams = LinearLayout.LayoutParams(dp(18), dp(18))
+            }
+            addView(icon)
             setOnClickListener {
                 TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = false) }
                 updateOverlayContent()
@@ -911,10 +978,13 @@ class TtsPlaybackService : Service() {
         }
 
         root.addView(expanded)
-        root.addView(minimizedPill)
+        root.addView(edgeTab)
+
+        savedExpandedX = dp(24)
+        savedExpandedY = dp(120)
 
         val params = WindowManager.LayoutParams(
-            dp(320),
+            dp(260),
             WindowManager.LayoutParams.WRAP_CONTENT,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -926,15 +996,15 @@ class TtsPlaybackService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(20)
-            y = dp(140)
+            x = savedExpandedX
+            y = savedExpandedY
         }
 
         var initX = 0
         var initY = 0
         var touchX = 0f
         var touchY = 0f
-        headerRow.setOnTouchListener { _, event ->
+        topRow.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initX = params.x
@@ -946,6 +1016,8 @@ class TtsPlaybackService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     params.x = initX + (event.rawX - touchX).toInt()
                     params.y = initY + (event.rawY - touchY).toInt()
+                    savedExpandedX = params.x
+                    savedExpandedY = params.y
                     runCatching { wm.updateViewLayout(root, params) }
                     true
                 }
@@ -956,10 +1028,10 @@ class TtsPlaybackService : Service() {
         runCatching {
             wm.addView(root, params)
             overlayView = root
-            overlayParagraphTv = paraTv
+            overlaySentenceTv = sentenceTv
             overlayPlayBtn = playBtn
             overlayExpandedContainer = expanded
-            overlayMinimizedPill = minimizedPill
+            overlayEdgeTab = edgeTab
             overlayParams = params
         }
     }
@@ -974,32 +1046,27 @@ class TtsPlaybackService : Service() {
 
         if (st.floatingPopupTemporarilyHidden) {
             overlayExpandedContainer?.visibility = View.GONE
-            overlayMinimizedPill?.visibility = View.VISIBLE
-            overlayMinimizedPill?.text = if (st.isPlaying) "Speaking • Restore" else "TTS • Restore"
-            params.width = WindowManager.LayoutParams.WRAP_CONTENT
+            overlayEdgeTab?.visibility = View.VISIBLE
+            params.gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            params.x = 0
+            params.y = 0
+            params.width = dp(32)
+            params.height = dp(48)
         } else {
             overlayExpandedContainer?.visibility = View.VISIBLE
-            overlayMinimizedPill?.visibility = View.GONE
-            params.width = dp(320)
+            overlayEdgeTab?.visibility = View.GONE
+            params.gravity = Gravity.TOP or Gravity.START
+            params.x = savedExpandedX
+            params.y = savedExpandedY
+            params.width = dp(260)
+            params.height = WindowManager.LayoutParams.WRAP_CONTENT
 
-            val para = st.currentParagraphText.ifBlank { "Tap Play to begin reading aloud." }
-            val sentence = st.currentSentenceText
-            val span = SpannableString(para)
-            if (sentence.isNotBlank()) {
-                val start = para.indexOf(sentence)
-                if (start >= 0) {
-                    val end = (start + sentence.length).coerceAtMost(para.length)
-                    span.setSpan(
-                        BackgroundColorSpan(Color.parseColor("#66F2A164")),
-                        start,
-                        end,
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-                    )
-                    span.setSpan(StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                }
+            overlaySentenceTv?.text = st.currentSentenceText.ifBlank {
+                st.currentParagraphText.ifBlank { "Tap Play to speak" }
             }
-            overlayParagraphTv?.text = span
-            overlayPlayBtn?.text = if (st.isPlaying) "Pause" else "Play"
+            overlayPlayBtn?.setImageResource(
+                if (st.isPlaying) R.drawable.ic_pause else R.drawable.ic_play_arrow
+            )
         }
         runCatching { wm.updateViewLayout(root, params) }
     }
@@ -1009,10 +1076,10 @@ class TtsPlaybackService : Service() {
             runCatching { windowManager?.removeView(v) }
         }
         overlayView = null
-        overlayParagraphTv = null
+        overlaySentenceTv = null
         overlayPlayBtn = null
         overlayExpandedContainer = null
-        overlayMinimizedPill = null
+        overlayEdgeTab = null
         overlayParams = null
     }
 
@@ -1043,6 +1110,7 @@ class TtsPlaybackService : Service() {
         const val ACTION_SET_RATE = "com.example.tts.SET_RATE"
         const val ACTION_SET_PITCH = "com.example.tts.SET_PITCH"
         const val ACTION_SET_ENGINE = "com.example.tts.SET_ENGINE"
+        const val ACTION_SET_LANGUAGE = "com.example.tts.SET_LANGUAGE"
         const val ACTION_SET_VOICE = "com.example.tts.SET_VOICE"
         const val ACTION_SET_SLEEP_TIMER = "com.example.tts.SET_SLEEP_TIMER"
         const val ACTION_SET_FLOATING_POPUP = "com.example.tts.SET_FLOATING_POPUP"

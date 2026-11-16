@@ -3,6 +3,10 @@ package com.example
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.audiobook.AudiobookChapterMeta
+import com.example.audiobook.SyncAlignmentSegment
+import com.example.audiobook.SyncAlignmentSerializer
+import com.example.data.db.AudiobookEntity
 import com.example.data.db.BookEntity
 import com.example.data.db.LexiDatabase
 import com.example.data.db.LibrarySortOption
@@ -14,6 +18,7 @@ import com.example.export.Mp4ChapterAndMetadataWriter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -35,7 +40,7 @@ import kotlin.math.sin
 class LexiVoiceCoreTest {
 
     @Test
-    fun `epub parser extracts metadata chapters and indexed sentences`() {
+    fun `epub parser extracts metadata chapters webview spans and css`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val epubFile = File(context.cacheDir, "sample_test.epub")
         createSampleEpub(epubFile)
@@ -60,7 +65,7 @@ class LexiVoiceCoreTest {
         assertEquals("Chapter I: Introduction", structure.chapters[0].title)
         assertEquals("Chapter II: The Machine", structure.chapters[1].title)
 
-        val ch1 = EpubParser.loadChapterContent(
+        val webPayload = EpubParser.loadChapterForWebView(
             context = context,
             fileKey = epubFile.absolutePath,
             isDirectPath = true,
@@ -68,10 +73,44 @@ class LexiVoiceCoreTest {
             chapterHref = structure.chapters[0].href,
             chapterTitle = structure.chapters[0].title
         )
-        assertTrue(ch1.paragraphs.size >= 2)
-        assertTrue(ch1.sentences.size >= 3)
-        assertTrue(ch1.plainText.contains("Time Traveller"))
+        assertTrue(webPayload.paragraphs.size >= 2)
+        assertTrue(webPayload.sentences.size >= 3)
+        assertTrue(webPayload.htmlWithSentenceSpans.contains("lexi-s"))
+        assertTrue(webPayload.htmlWithSentenceSpans.contains("data-idx=\"0\""))
+        assertTrue(webPayload.htmlWithSentenceSpans.contains("styles.css"))
+        assertTrue(webPayload.htmlWithSentenceSpans.contains("lexiHighlightSentence"))
         epubFile.delete()
+    }
+
+    @Test
+    fun `sync alignment binary search resolves active sentence and json roundtrips`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val syncFile = File(context.cacheDir, "sync_test.json")
+        val segments = listOf(
+            SyncAlignmentSegment(0, 0, "First sentence.", 0L, 2100L),
+            SyncAlignmentSegment(0, 1, "Second sentence.", 2100L, 4800L),
+            SyncAlignmentSegment(1, 0, "Chapter two begins.", 4800L, 7500L)
+        )
+        SyncAlignmentSerializer.saveSegments(syncFile, segments)
+        val decoded = SyncAlignmentSerializer.loadSegments(syncFile)
+        assertEquals(3, decoded.size)
+
+        val hit1 = SyncAlignmentSerializer.findSegmentAtPosition(decoded, 2500L)
+        assertNotNull(hit1)
+        assertEquals(0, hit1?.chapterIndex)
+        assertEquals(1, hit1?.sentenceIndex)
+
+        val hit2 = SyncAlignmentSerializer.findSegmentAtPosition(decoded, 6200L)
+        assertEquals(1, hit2?.chapterIndex)
+        assertEquals(0, hit2?.sentenceIndex)
+
+        val chaptersJson = SyncAlignmentSerializer.encodeChapters(
+            listOf(AudiobookChapterMeta(0, "Ch 1", 0L, 4800L))
+        )
+        val decodedCh = SyncAlignmentSerializer.decodeChapters(chaptersJson)
+        assertEquals(1, decodedCh.size)
+        assertEquals("Ch 1", decodedCh[0].title)
+        syncFile.delete()
     }
 
     @Test
@@ -97,7 +136,6 @@ class LexiVoiceCoreTest {
         assertTrue(ok)
         assertTrue(outMp3.exists() && outMp3.length() > 500L)
         val header = outMp3.readBytes().take(3).map { it.toInt() and 0xFF }
-        // Either ID3v2 ("ID3") or direct MPEG frame sync (0xFF 0xFB / 0xFF 0xF3)
         val hasId3 = header == listOf('I'.code, 'D'.code, '3'.code)
         val hasSync = header[0] == 0xFF && (header[1] and 0xE0) == 0xE0
         assertTrue(hasId3 || hasSync)
@@ -108,19 +146,18 @@ class LexiVoiceCoreTest {
     }
 
     @Test
-    fun `mp4 chapter writer injects chpl and ilst metadata cleanly`() {
+    fun `mp4 chapter writer injects m4b brand chpl covr and ilst metadata cleanly`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
-        val rawMp4 = File(context.cacheDir, "raw_test.m4a")
-        val taggedMp4 = File(context.cacheDir, "tagged_test.m4a")
+        val rawMp4 = File(context.cacheDir, "raw_test.m4b")
+        val taggedMp4 = File(context.cacheDir, "tagged_test.m4b")
 
-        // Minimal valid ftyp + mdat + moov(stco) container
         val ftyp = wrapAtom("ftyp", "M4A ".toByteArray() + ByteArray(4) + "M4A mp42isom".toByteArray())
         val mdat = wrapAtom("mdat", ByteArray(64))
         val stcoPayload = ByteArrayOutputStream().apply {
             DataOutputStream(this).apply {
-                writeInt(0) // version/flags
-                writeInt(1) // entry count
-                writeInt(ftyp.size + 8) // offset pointing to mdat payload
+                writeInt(0)
+                writeInt(1)
+                writeInt(ftyp.size + 8)
             }
         }.toByteArray()
         val stco = wrapAtom("stco", stcoPayload)
@@ -145,21 +182,24 @@ class LexiVoiceCoreTest {
             ),
             metadata = M4aMetadataConfig(
                 enabled = true,
-                title = "My Audiobook",
+                title = "My M4B Audiobook",
                 author = "Author Name",
                 album = "Book Series",
                 narrator = "LexiVoice",
                 year = "2026",
                 genre = "Audiobook"
             ),
-            coverBytes = null
+            coverBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()),
+            useM4bBrand = true
         )
 
         val resultText = String(taggedMp4.readBytes(), StandardCharsets.ISO_8859_1)
+        assertTrue(resultText.contains("M4B "))
         assertTrue(resultText.contains("chpl"))
+        assertTrue(resultText.contains("covr"))
         assertTrue(resultText.contains("001 - Opening"))
         assertTrue(resultText.contains("002 - Finale"))
-        assertTrue(resultText.contains("My Audiobook"))
+        assertTrue(resultText.contains("My M4B Audiobook"))
         assertTrue(resultText.contains("Author Name"))
 
         rawMp4.delete()
@@ -167,12 +207,13 @@ class LexiVoiceCoreTest {
     }
 
     @Test
-    fun `room library dao searches and sorts books efficiently`() = runBlocking {
+    fun `room database indexes books and m4b audiobooks efficiently`() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, LexiDatabase::class.java)
             .allowMainThreadQueries()
             .build()
         val bookDao = db.bookDao()
+        val audiobookDao = db.audiobookDao()
 
         bookDao.upsertPreservingProgress(
             listOf(
@@ -205,6 +246,23 @@ class LexiVoiceCoreTest {
         assertEquals("Dune", sortedByAuthor[0].title)
         assertEquals("Foundation", sortedByAuthor[1].title)
 
+        val m4bId = audiobookDao.upsertAudiobook(
+            AudiobookEntity(
+                fileUri = "/books/Dune.m4b",
+                isDirectPath = true,
+                title = "Dune",
+                author = "Frank Herbert",
+                durationMs = 120_000L,
+                chapterCount = 48,
+                sourceEpubKey = "/books/dune.epub",
+                syncJsonPath = "/files/sync/dune.json"
+            )
+        )
+        assertTrue(m4bId > 0L)
+        audiobookDao.updatePlaybackProgress(m4bId, 45_000L, 999L)
+        val loaded = audiobookDao.getAudiobookById(m4bId)
+        assertEquals(45_000L, loaded?.lastPositionMs)
+
         db.close()
     }
 
@@ -227,8 +285,8 @@ class LexiVoiceCoreTest {
         bb.put("WAVE".toByteArray())
         bb.put("fmt ".toByteArray())
         bb.putInt(16)
-        bb.putShort(1) // PCM
-        bb.putShort(1) // Mono
+        bb.putShort(1)
+        bb.putShort(1)
         bb.putInt(sampleRate)
         bb.putInt(sampleRate * 2)
         bb.putShort(2)
@@ -273,6 +331,7 @@ class LexiVoiceCoreTest {
                   </metadata>
                   <manifest>
                     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+                    <item id="css" href="styles.css" media-type="text/css"/>
                     <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
                     <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
                   </manifest>
@@ -283,6 +342,10 @@ class LexiVoiceCoreTest {
                 </package>
                 """.trimIndent().toByteArray()
             )
+            zip.closeEntry()
+
+            zip.putNextEntry(ZipEntry("OEBPS/styles.css"))
+            zip.write("body { font-family: serif; }".toByteArray())
             zip.closeEntry()
 
             zip.putNextEntry(ZipEntry("OEBPS/toc.ncx"))
@@ -308,7 +371,7 @@ class LexiVoiceCoreTest {
             zip.putNextEntry(ZipEntry("OEBPS/ch1.xhtml"))
             zip.write(
                 """
-                <html><body>
+                <html><head><link rel="stylesheet" href="styles.css"/></head><body>
                 <h1>Chapter I</h1>
                 <p>The Time Traveller was expounding a recondite matter to us. His grey eyes shone and twinkled.</p>
                 <p>Wait a minute! Listen carefully to what happens next.</p>

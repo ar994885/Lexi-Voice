@@ -65,6 +65,11 @@
             android:exported="false"
             android:foregroundServiceType="dataSync|mediaPlayback" />
 
+        <service
+            android:name=".audiobook.M4bPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <receiver
             android:name="androidx.media.session.MediaButtonReceiver"
             android:exported="true">

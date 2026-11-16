@@ -25,6 +25,12 @@ data class TtsEngineOption(
     val label: String
 )
 
+data class TtsLanguageOption(
+    val localeTag: String,
+    val displayName: String,
+    val voiceCount: Int
+)
+
 data class TtsVoiceOption(
     val name: String,
     val localeTag: String,
@@ -56,6 +62,7 @@ data class TtsPlaybackState(
     val selectedVoiceName: String = "",
     val selectedLocaleTag: String = "",
     val availableEngines: List<TtsEngineOption> = emptyList(),
+    val availableLanguages: List<TtsLanguageOption> = emptyList(),
     val availableVoices: List<TtsVoiceOption> = emptyList(),
     val sleepTimerMode: SleepTimerMode = SleepTimerMode.OFF,
     val sleepRemainingMs: Long = 0L,

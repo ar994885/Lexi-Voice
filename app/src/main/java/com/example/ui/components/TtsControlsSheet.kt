@@ -3,8 +3,8 @@ package com.example.ui.components
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,24 +30,25 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material3.AssistChip
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
@@ -53,6 +56,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -71,17 +75,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.LexiVoiceApplication
 import com.example.tts.SleepTimerMode
 import com.example.tts.TtsPlaybackService
@@ -144,11 +148,8 @@ fun TtsDockedBar(
                                 val mins = (ttsState.sleepRemainingMs / 60000L) + 1
                                 append(" • Sleep: ${mins}m")
                             }
-                            if (ttsState.selectedEnginePackage.isNotBlank()) {
-                                val engLabel = ttsState.availableEngines
-                                    .firstOrNull { it.packageName == ttsState.selectedEnginePackage }
-                                    ?.label
-                                if (!engLabel.isNullOrBlank()) append(" • $engLabel")
+                            if (ttsState.selectedLocaleTag.isNotBlank()) {
+                                append(" • ${ttsState.selectedLocaleTag}")
                             }
                         },
                         style = MaterialTheme.typography.bodySmall,
@@ -206,7 +207,7 @@ fun TtsDockedBar(
                     onClick = onOpenControlsSheet,
                     modifier = Modifier.testTag("tts_open_settings_sheet_button")
                 ) {
-                    Icon(Icons.Default.Tune, contentDescription = "Voice, Rate & Sleep Timer")
+                    Icon(Icons.Default.Tune, contentDescription = "Engine, Language, Voice & Sleep Timer")
                 }
             }
         }
@@ -224,11 +225,29 @@ fun TtsControlsModalSheet(
     val prefsRepo = app.preferencesRepository
     val scope = rememberCoroutineScope()
 
-    var showEngineMenu by remember { mutableStateOf(false) }
-    var showVoiceMenu by remember { mutableStateOf(false) }
+    var showEngineDialog by remember { mutableStateOf(false) }
+    var showLanguageDialog by remember { mutableStateOf(false) }
+    var showVoiceDialog by remember { mutableStateOf(false) }
     var customMinutesInput by remember { mutableStateOf("20") }
     val canDrawOverlay = remember(ttsState.floatingPopupVisible) {
         Settings.canDrawOverlays(context)
+    }
+
+    // Filtered voices strictly matching the chosen Language / Locale
+    val filteredVoices = remember(ttsState.availableVoices, ttsState.selectedLocaleTag) {
+        val tag = ttsState.selectedLocaleTag
+        if (tag.isBlank()) {
+            ttsState.availableVoices
+        } else {
+            val exact = ttsState.availableVoices.filter { it.localeTag.equals(tag, ignoreCase = true) }
+            if (exact.isNotEmpty()) exact
+            else {
+                val baseLang = tag.substringBefore('-').substringBefore('_')
+                ttsState.availableVoices.filter {
+                    it.localeTag.startsWith(baseLang, ignoreCase = true)
+                }
+            }
+        }
     }
 
     ModalBottomSheet(
@@ -333,101 +352,66 @@ fun TtsControlsModalSheet(
             HorizontalDivider()
             Spacer(Modifier.height(12.dp))
 
-            // TTS Engine & Voice Selector
-            Text("TTS Engine & Voice", style = MaterialTheme.typography.titleSmall)
-            Spacer(Modifier.height(8.dp))
-
-            Box {
-                val selectedEngineLabel = ttsState.availableEngines
-                    .firstOrNull { it.packageName == ttsState.selectedEnginePackage }
-                    ?.label ?: ttsState.selectedEnginePackage.ifBlank { "System Default TTS Engine" }
-                OutlinedButton(
-                    onClick = {
-                        TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_INIT_ENGINES)
-                        showEngineMenu = true
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Default.RecordVoiceOver, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text(selectedEngineLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                DropdownMenu(expanded = showEngineMenu, onDismissRequest = { showEngineMenu = false }) {
-                    if (ttsState.availableEngines.isEmpty()) {
-                        DropdownMenuItem(
-                            text = { Text("System Default Engine") },
-                            onClick = { showEngineMenu = false }
-                        )
-                    }
-                    ttsState.availableEngines.forEach { engine ->
-                        DropdownMenuItem(
-                            text = { Text("${engine.label} (${engine.packageName})") },
-                            onClick = {
-                                showEngineMenu = false
-                                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_SET_ENGINE) {
-                                    putExtra(TtsPlaybackService.EXTRA_STRING, engine.packageName)
-                                }
-                                scope.launch {
-                                    prefsRepo.updateTtsSettings { it.copy(enginePackage = engine.packageName, voiceName = "") }
-                                }
-                            }
-                        )
-                    }
-                }
+            // Step 1 -> Step 2 -> Step 3: Engine -> Language -> Voice Hierarchy
+            Text("1. Speech Engine", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(6.dp))
+            val selectedEngineLabel = ttsState.availableEngines
+                .firstOrNull { it.packageName == ttsState.selectedEnginePackage }
+                ?.label ?: ttsState.selectedEnginePackage.ifBlank { "System Default TTS Engine" }
+            OutlinedButton(
+                onClick = {
+                    TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_INIT_ENGINES)
+                    showEngineDialog = true
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tts_select_engine_button")
+            ) {
+                Icon(Icons.Default.RecordVoiceOver, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(selectedEngineLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
 
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(10.dp))
+            Text("2. Language / Locale", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(6.dp))
+            val selectedLangLabel = ttsState.availableLanguages
+                .firstOrNull { it.localeTag.equals(ttsState.selectedLocaleTag, ignoreCase = true) }
+                ?.let { "${it.displayName} (${it.voiceCount} voices)" }
+                ?: ttsState.selectedLocaleTag.ifBlank { "Choose Language" }
+            OutlinedButton(
+                onClick = { showLanguageDialog = true },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tts_select_language_button")
+            ) {
+                Icon(Icons.Default.Language, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(selectedLangLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
 
-            Box {
-                val voiceDisplay = ttsState.availableVoices
-                    .firstOrNull { it.name == ttsState.selectedVoiceName }
-                    ?.let { "${it.displayLocale} (${it.name.takeLast(14)})" }
-                    ?: "Default Voice (${ttsState.availableVoices.size} available)"
-                OutlinedButton(
-                    onClick = { showVoiceMenu = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(voiceDisplay, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                DropdownMenu(
-                    expanded = showVoiceMenu,
-                    onDismissRequest = { showVoiceMenu = false },
-                    modifier = Modifier.heightIn(max = 320.dp)
-                ) {
-                    ttsState.availableVoices.take(80).forEach { voice ->
-                        DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(voice.displayLocale, style = MaterialTheme.typography.bodyMedium)
-                                    Text(
-                                        text = if (voice.isNetworkRequired) "${voice.name} (Online)" else "${voice.name} (Offline)",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            },
-                            onClick = {
-                                showVoiceMenu = false
-                                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_SET_VOICE) {
-                                    putExtra(TtsPlaybackService.EXTRA_STRING, voice.name)
-                                    putExtra(TtsPlaybackService.EXTRA_LOCALE, voice.localeTag)
-                                }
-                                scope.launch {
-                                    prefsRepo.updateTtsSettings {
-                                        it.copy(voiceName = voice.name, localeTag = voice.localeTag)
-                                    }
-                                }
-                            }
-                        )
-                    }
-                }
+            Spacer(Modifier.height(10.dp))
+            Text("3. Voice (${filteredVoices.size} in selected language)", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(6.dp))
+            val voiceDisplay = filteredVoices
+                .firstOrNull { it.name == ttsState.selectedVoiceName }
+                ?.let { "${it.displayLocale} • ${it.name.takeLast(18)}" }
+                ?: "Default Voice (${filteredVoices.size} available)"
+            OutlinedButton(
+                onClick = { showVoiceDialog = true },
+                enabled = filteredVoices.isNotEmpty(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tts_select_voice_button")
+            ) {
+                Text(voiceDisplay, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
 
             Spacer(Modifier.height(14.dp))
             HorizontalDivider()
             Spacer(Modifier.height(14.dp))
 
-            // Sleep Timer: End of Chapter, Custom Minutes entry by typing, No Timer
+            // Sleep Timer
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Bedtime, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp))
@@ -456,7 +440,7 @@ fun TtsControlsModalSheet(
                             putExtra(TtsPlaybackService.EXTRA_STRING, SleepTimerMode.OFF.name)
                         }
                     },
-                    label = { Text("No Timer") }
+                    label = { Text("Off") }
                 )
                 FilterChip(
                     selected = ttsState.sleepTimerMode == SleepTimerMode.END_OF_CHAPTER,
@@ -518,8 +502,8 @@ fun TtsControlsModalSheet(
             HorizontalDivider()
             Spacer(Modifier.height(14.dp))
 
-            // Floating Popup Mode
-            Text("Floating TTS Popup", style = MaterialTheme.typography.titleSmall)
+            // Compact Floating Overlay Mode
+            Text("Compact Floating Overlay", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(6.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -537,7 +521,7 @@ fun TtsControlsModalSheet(
                 ) {
                     Icon(Icons.Default.PictureInPictureAlt, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    Text(if (ttsState.floatingPopupVisible) "Hide Floating Popup" else "Show Floating Popup")
+                    Text(if (ttsState.floatingPopupVisible) "Hide Floating Bar" else "Show Floating Bar")
                 }
 
                 if (!canDrawOverlay) {
@@ -550,24 +534,137 @@ fun TtsControlsModalSheet(
                             context.startActivity(intent)
                         }
                     ) {
-                        Icon(Icons.Default.OpenInNew, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Overlay Perm")
+                        Text("Allow Overlay")
                     }
                 }
             }
         }
     }
+
+    // Step 1 Dialog: Engine
+    if (showEngineDialog) {
+        AlertDialog(
+            onDismissRequest = { showEngineDialog = false },
+            title = { Text("Select TTS Engine") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                    items(ttsState.availableEngines, key = { it.packageName }) { engine ->
+                        val selected = engine.packageName == ttsState.selectedEnginePackage
+                        ListItem(
+                            headlineContent = { Text(engine.label) },
+                            supportingContent = { Text(engine.packageName, style = MaterialTheme.typography.bodySmall) },
+                            trailingContent = {
+                                if (selected) Icon(Icons.Default.Check, contentDescription = "Selected")
+                            },
+                            modifier = Modifier.clickable {
+                                showEngineDialog = false
+                                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_SET_ENGINE) {
+                                    putExtra(TtsPlaybackService.EXTRA_STRING, engine.packageName)
+                                }
+                                scope.launch {
+                                    prefsRepo.updateTtsSettings {
+                                        it.copy(enginePackage = engine.packageName, voiceName = "", localeTag = "")
+                                    }
+                                }
+                            }
+                        )
+                        HorizontalDivider()
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showEngineDialog = false }) { Text("Close") }
+            }
+        )
+    }
+
+    // Step 2 Dialog: Scrollable Language / Locale Picker (Device default + English pinned at top)
+    if (showLanguageDialog) {
+        AlertDialog(
+            onDismissRequest = { showLanguageDialog = false },
+            title = { Text("Select Language") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(ttsState.availableLanguages, key = { it.localeTag }) { lang ->
+                        val selected = lang.localeTag.equals(ttsState.selectedLocaleTag, ignoreCase = true)
+                        ListItem(
+                            headlineContent = { Text(lang.displayName) },
+                            supportingContent = {
+                                Text("${lang.localeTag} • ${lang.voiceCount} voice(s)")
+                            },
+                            trailingContent = {
+                                if (selected) Icon(Icons.Default.Check, contentDescription = "Selected")
+                            },
+                            modifier = Modifier.clickable {
+                                showLanguageDialog = false
+                                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_SET_LANGUAGE) {
+                                    putExtra(TtsPlaybackService.EXTRA_LOCALE, lang.localeTag)
+                                }
+                                scope.launch {
+                                    prefsRepo.updateTtsSettings {
+                                        it.copy(localeTag = lang.localeTag, voiceName = "")
+                                    }
+                                }
+                            }
+                        )
+                        HorizontalDivider()
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLanguageDialog = false }) { Text("Close") }
+            }
+        )
+    }
+
+    // Step 3 Dialog: Scrollable Voice Picker strictly filtered to selected Language
+    if (showVoiceDialog) {
+        AlertDialog(
+            onDismissRequest = { showVoiceDialog = false },
+            title = { Text("Select Voice (${ttsState.selectedLocaleTag})") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(filteredVoices, key = { it.name }) { voice ->
+                        val selected = voice.name == ttsState.selectedVoiceName
+                        ListItem(
+                            headlineContent = { Text(voice.name) },
+                            supportingContent = {
+                                Text(
+                                    "${voice.displayLocale} • " +
+                                        if (voice.isNetworkRequired) "Network voice" else "Offline local voice"
+                                )
+                            },
+                            trailingContent = {
+                                if (selected) Icon(Icons.Default.Check, contentDescription = "Selected")
+                            },
+                            modifier = Modifier.clickable {
+                                showVoiceDialog = false
+                                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_SET_VOICE) {
+                                    putExtra(TtsPlaybackService.EXTRA_STRING, voice.name)
+                                    putExtra(TtsPlaybackService.EXTRA_LOCALE, voice.localeTag)
+                                }
+                                scope.launch {
+                                    prefsRepo.updateTtsSettings {
+                                        it.copy(voiceName = voice.name, localeTag = voice.localeTag)
+                                    }
+                                }
+                            }
+                        )
+                        HorizontalDivider()
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVoiceDialog = false }) { Text("Close") }
+            }
+        )
+    }
 }
 
 /**
- * In-app draggable T2S Floating Popup showing:
- * - Current reading paragraph (with active sentence highlighted)
- * - Play / Pause button
- * - Back (prev sentence) button
- * - Front (next sentence) button
- * - Close button
- * - Temporarily Hide button (collapses to a tiny draggable pill until tapped)
+ * Compact T2S-style in-app floating overlay fallback when SYSTEM_ALERT_WINDOW is not granted:
+ * ~260dp wide, 8dp rounded corners, semi-transparent dark #E61E1E24, 6dp padding,
+ * 2-line sentence preview (12sp) + edge-dock minimize + close, and 36dp vector icon buttons.
  */
 @Composable
 fun InAppFloatingTtsPopup(
@@ -576,67 +673,90 @@ fun InAppFloatingTtsPopup(
 ) {
     if (!ttsState.floatingPopupVisible) return
     val context = LocalContext.current
-    // If system overlay is active and granted, avoid duplicating inside the app unless user isn't granted overlay perm
     if (Settings.canDrawOverlays(context)) return
 
     var offsetX by remember { mutableFloatStateOf(24f) }
-    var offsetY by remember { mutableFloatStateOf(160f) }
+    var offsetY by remember { mutableFloatStateOf(140f) }
 
-    Box(
-        modifier = modifier
-            .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
-            .pointerInput(Unit) {
-                detectDragGestures { change, dragAmount ->
-                    change.consume()
-                    offsetX += dragAmount.x
-                    offsetY += dragAmount.y
+    if (ttsState.floatingPopupTemporarilyHidden) {
+        Box(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(top = 180.dp),
+            contentAlignment = Alignment.CenterEnd
+        ) {
+            Surface(
+                color = Color(0xE61E1E24),
+                shape = RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp),
+                shadowElevation = 6.dp,
+                modifier = Modifier
+                    .size(width = 32.dp, height = 48.dp)
+                    .clickable {
+                        TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = false) }
+                    }
+                    .testTag("floating_popup_restore_tab")
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.PlayArrow,
+                        contentDescription = "Restore floating TTS bar",
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
-    ) {
-        if (ttsState.floatingPopupTemporarilyHidden) {
-            AssistChip(
-                onClick = {
-                    TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = false) }
-                },
-                label = {
-                    Text(if (ttsState.isPlaying) "TTS Speaking • Tap to show" else "TTS Hidden • Tap to show")
-                },
-                leadingIcon = {
-                    Icon(Icons.Default.RecordVoiceOver, contentDescription = "Restore Floating Popup")
+        }
+    } else {
+        Box(
+            modifier = modifier
+                .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        offsetX += dragAmount.x
+                        offsetY += dragAmount.y
+                    }
                 }
-            )
-        } else {
-            Card(
-                shape = RoundedCornerShape(18.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xE61E1E24),
+                border = BorderStroke(1.dp, Color(0x33FFFFFF)),
+                shadowElevation = 8.dp,
                 modifier = Modifier
-                    .width(320.dp)
+                    .width(260.dp)
                     .testTag("in_app_floating_tts_popup")
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(modifier = Modifier.padding(6.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Floating Reader",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.weight(1f)
+                            text = ttsState.currentSentenceText.ifBlank {
+                                ttsState.currentParagraphText.ifBlank { "Tap Play to speak" }
+                            },
+                            color = Color(0xFFF5F5F7),
+                            fontSize = 12.sp,
+                            lineHeight = 15.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(horizontal = 4.dp)
                         )
                         IconButton(
                             onClick = {
                                 TtsStateHolder.updateState { it.copy(floatingPopupTemporarilyHidden = true) }
                             },
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(28.dp)
                                 .testTag("floating_popup_temp_hide_button")
                         ) {
                             Icon(
-                                Icons.Default.VisibilityOff,
-                                contentDescription = "Temporarily hide popup",
+                                Icons.Default.Remove,
+                                contentDescription = "Dock to screen edge",
+                                tint = Color(0xFFB8BCC8),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -647,78 +767,70 @@ fun InAppFloatingTtsPopup(
                                 }
                             },
                             modifier = Modifier
-                                .size(36.dp)
+                                .size(28.dp)
                                 .testTag("floating_popup_close_button")
                         ) {
                             Icon(
                                 Icons.Default.Close,
-                                contentDescription = "Close popup",
+                                contentDescription = "Close overlay",
+                                tint = Color(0xFFB8BCC8),
                                 modifier = Modifier.size(18.dp)
                             )
                         }
                     }
 
-                    val para = ttsState.currentParagraphText.ifBlank { "Tap Play to begin speaking." }
-                    val sent = ttsState.currentSentenceText
-                    val highlightColor = MaterialTheme.colorScheme.primaryContainer
-                    val annotated = remember(para, sent, highlightColor) {
-                        buildAnnotatedString {
-                            val idx = if (sent.isNotBlank()) para.indexOf(sent) else -1
-                            if (idx >= 0) {
-                                append(para.substring(0, idx))
-                                withStyle(
-                                    SpanStyle(
-                                        background = highlightColor,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                ) {
-                                    append(para.substring(idx, idx + sent.length))
-                                }
-                                append(para.substring(idx + sent.length))
-                            } else {
-                                append(para)
-                            }
-                        }
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 56.dp, max = 120.dp)
-                            .verticalScroll(rememberScrollState())
-                            .padding(vertical = 6.dp)
-                    ) {
-                        Text(text = annotated, style = MaterialTheme.typography.bodyMedium)
-                    }
+                    Spacer(Modifier.height(4.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        OutlinedButton(
+                        IconButton(
                             onClick = { TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_PREV_SENTENCE) },
                             modifier = Modifier
-                                .weight(1f)
+                                .size(36.dp)
                                 .testTag("floating_popup_back_button")
                         ) {
-                            Text("Back")
+                            Icon(
+                                Icons.Rounded.SkipPrevious,
+                                contentDescription = "Previous sentence",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
-                        Button(
-                            onClick = { TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE) },
+                        Spacer(Modifier.width(16.dp))
+                        Box(
+                            contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .weight(1.1f)
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFD97736))
+                                .clickable {
+                                    TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
+                                }
                                 .testTag("floating_popup_play_button")
                         ) {
-                            Text(if (ttsState.isPlaying) "Pause" else "Play")
+                            Icon(
+                                imageVector = if (ttsState.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                contentDescription = if (ttsState.isPlaying) "Pause" else "Play",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
-                        OutlinedButton(
+                        Spacer(Modifier.width(16.dp))
+                        IconButton(
                             onClick = { TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_NEXT_SENTENCE) },
                             modifier = Modifier
-                                .weight(1f)
+                                .size(36.dp)
                                 .testTag("floating_popup_front_button")
                         ) {
-                            Text("Front")
+                            Icon(
+                                Icons.Rounded.SkipNext,
+                                contentDescription = "Next sentence",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
                         }
                     }
                 }

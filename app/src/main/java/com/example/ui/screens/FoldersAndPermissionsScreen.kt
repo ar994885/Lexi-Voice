@@ -1,12 +1,9 @@
 package com.example.ui.screens
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -14,23 +11,23 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderSpecial
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.PictureInPictureAlt
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -73,6 +70,8 @@ import java.util.Locale
 @Composable
 fun FoldersAndPermissionsScreen(
     viewModel: LibraryViewModel,
+    onOpenDrawer: () -> Unit,
+    onNavigateToSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -82,6 +81,7 @@ fun FoldersAndPermissionsScreen(
 
     var resumeTick by remember { mutableIntStateOf(0) }
     var showDirectPathDialog by remember { mutableStateOf(false) }
+    var showNeedPermissionDialog by remember { mutableStateOf(false) }
     var customDirectPath by remember {
         mutableStateOf(Environment.getExternalStorageDirectory().absolutePath + "/Books")
     }
@@ -105,44 +105,27 @@ fun FoldersAndPermissionsScreen(
         }
     }
 
-    val hasNotificationPerm = remember(resumeTick) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
-    }
-
-    val hasOverlayPerm = remember(resumeTick) {
-        Settings.canDrawOverlays(context)
-    }
-
     val safFolderLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) viewModel.addSafFolder(uri)
     }
 
-    val notificationPermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) {
-        resumeTick++
-    }
-
-    val legacyStoragePermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) {
-        resumeTick++
-    }
-
     Scaffold(
         modifier = modifier,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
-                title = { Text("Watched Folders & Permissions") },
+                modifier = Modifier.statusBarsPadding(),
+                navigationIcon = {
+                    IconButton(
+                        onClick = onOpenDrawer,
+                        modifier = Modifier.testTag("drawer_menu_button")
+                    ) {
+                        Icon(Icons.Default.Menu, contentDescription = "Open Navigation Menu")
+                    }
+                },
+                title = { Text("Manage Folders") },
                 actions = {
                     IconButton(onClick = { viewModel.syncNow() }) {
                         Icon(Icons.Default.Sync, contentDescription = "Sync All Folders")
@@ -154,73 +137,12 @@ fun FoldersAndPermissionsScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues),
+                .padding(paddingValues)
+                .navigationBarsPadding(),
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
-                Text(
-                    text = "Required & Optional Permissions",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-
-            item {
-                PermissionCard(
-                    title = "Notifications (Media & Batch Export)",
-                    subtitle = if (hasNotificationPerm) "Granted — lock-screen TTS & dual-progress export notifications active"
-                    else "Needed for Android 13+ background TTS playback & MP3 export progress bar",
-                    isGranted = hasNotificationPerm,
-                    icon = { Icon(Icons.Default.Notifications, contentDescription = null) },
-                    onGrant = {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        }
-                    }
-                )
-            }
-
-            item {
-                PermissionCard(
-                    title = "All-Files Direct Scanning (Librera Style)",
-                    subtitle = if (hasAllFilesAccess) "Granted — direct high-speed file path scanning enabled"
-                    else "Optional: scan internal/SD folders directly without SAF dialogs (or use SAF below)",
-                    isGranted = hasAllFilesAccess,
-                    icon = { Icon(Icons.Default.Security, contentDescription = null) },
-                    onGrant = {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            val intent = Intent(
-                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                Uri.parse("package:${context.packageName}")
-                            )
-                            context.startActivity(intent)
-                        } else {
-                            legacyStoragePermLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
-                        }
-                    }
-                )
-            }
-
-            item {
-                PermissionCard(
-                    title = "Floating TTS Popup Overlay (T2S Style)",
-                    subtitle = if (hasOverlayPerm) "Granted — floating reading popup can display over other apps"
-                    else "Optional: allow T2S reading popup to float above browsers & other apps",
-                    isGranted = hasOverlayPerm,
-                    icon = { Icon(Icons.Default.PictureInPictureAlt, contentDescription = null) },
-                    onGrant = {
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:${context.packageName}")
-                        )
-                        context.startActivity(intent)
-                    }
-                )
-            }
-
-            item {
-                Spacer(Modifier.height(6.dp))
                 Text(
                     text = "Add Library Folder",
                     style = MaterialTheme.typography.titleMedium,
@@ -243,8 +165,13 @@ fun FoldersAndPermissionsScreen(
                         Text("Pick Folder (SAF)")
                     }
                     OutlinedButton(
-                        onClick = { showDirectPathDialog = true },
-                        enabled = hasAllFilesAccess,
+                        onClick = {
+                            if (hasAllFilesAccess) {
+                                showDirectPathDialog = true
+                            } else {
+                                showNeedPermissionDialog = true
+                            }
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp)
@@ -260,7 +187,7 @@ fun FoldersAndPermissionsScreen(
             item {
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Assigned Watched Folders (${folders.size})",
+                    text = "Watched Folders (${folders.size})",
                     style = MaterialTheme.typography.titleMedium
                 )
             }
@@ -275,7 +202,7 @@ fun FoldersAndPermissionsScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "No folders assigned yet. Tap Pick Folder (SAF) or grant All-Files Access to scan a direct storage path automatically on startup and in the background.",
+                            text = "No folders assigned yet. Add a folder to automatically scan and index EPUB books and M4B audiobooks.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(16.dp)
@@ -388,51 +315,27 @@ fun FoldersAndPermissionsScreen(
             }
         )
     }
-}
 
-@Composable
-private fun PermissionCard(
-    title: String,
-    subtitle: String,
-    isGranted: Boolean,
-    icon: @Composable () -> Unit,
-    onGrant: () -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            icon()
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, style = MaterialTheme.typography.titleSmall)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            if (isGranted) {
-                Icon(
-                    Icons.Default.CheckCircle,
-                    contentDescription = "Granted",
-                    tint = MaterialTheme.colorScheme.secondary
-                )
-            } else {
-                Button(onClick = onGrant) {
-                    Text("Grant")
+    if (showNeedPermissionDialog) {
+        AlertDialog(
+            onDismissRequest = { showNeedPermissionDialog = false },
+            title = { Text("All-Files Access Required") },
+            text = {
+                Text("Enable All-Files Direct Scanning in Settings to add direct filesystem paths, or use Pick Folder (SAF) without extra permissions.")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showNeedPermissionDialog = false
+                    onNavigateToSettings()
+                }) {
+                    Text("Open Settings")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNeedPermissionDialog = false }) {
+                    Text("Cancel")
                 }
             }
-        }
+        )
     }
 }

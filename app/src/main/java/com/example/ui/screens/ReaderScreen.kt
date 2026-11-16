@@ -6,9 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +17,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
@@ -44,6 +41,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,24 +49,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.export.ExportChaptersActivity
 import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsSourceType
 import com.example.tts.TtsStateHolder
 import com.example.ui.ReaderViewModel
+import com.example.ui.components.EpubWebView
 import com.example.ui.components.TtsControlsModalSheet
 import com.example.ui.components.TtsDockedBar
-import com.example.ui.theme.LiterataFontFamily
-import com.example.ui.theme.PlusJakartaSansFontFamily
 import com.example.ui.theme.ReaderThemeMode
 import kotlin.math.roundToInt
 
@@ -88,10 +80,12 @@ fun ReaderScreen(
     var showTocSheet by remember { mutableStateOf(false) }
     var showAppearanceSheet by remember { mutableStateOf(false) }
     var showTtsSheet by remember { mutableStateOf(false) }
+    var latestScrollY by remember { mutableIntStateOf(0) }
 
-    val listState = rememberLazyListState()
-
-    BackHandler { onBack() }
+    BackHandler {
+        viewModel.saveScrollProgress(latestScrollY)
+        onBack()
+    }
 
     LaunchedEffect(bookId) {
         viewModel.openBook(bookId)
@@ -101,20 +95,10 @@ fun ReaderScreen(
         ttsState.sourceType == TtsSourceType.BOOK &&
         ttsState.bookId == bookId
 
-    // Auto-switch chapter when TTS moves into next/previous chapter
+    // Auto-switch chapter when TTS advances into the next/previous chapter
     LaunchedEffect(ttsState.chapterIndex, isTtsPlayingThisBook) {
         if (isTtsPlayingThisBook && ttsState.chapterIndex != uiState.currentChapterIndex) {
             viewModel.syncChapterFromTts(ttsState.chapterIndex)
-        }
-    }
-
-    // Auto-scroll to follow the active spoken sentence in real time
-    LaunchedEffect(ttsState.currentParagraphIndex, ttsState.sentenceIndex, isTtsPlayingThisBook) {
-        if (isTtsPlayingThisBook) {
-            val content = uiState.chapterContent
-            if (content != null && ttsState.currentParagraphIndex in content.paragraphs.indices) {
-                listState.animateScrollToItem(index = ttsState.currentParagraphIndex)
-            }
         }
     }
 
@@ -136,7 +120,7 @@ fun ReaderScreen(
                 navigationIcon = {
                     IconButton(
                         onClick = {
-                            viewModel.saveScrollProgress(listState.firstVisibleItemIndex)
+                            viewModel.saveScrollProgress(latestScrollY)
                             onBack()
                         },
                         modifier = Modifier.testTag("reader_back_button")
@@ -152,8 +136,13 @@ fun ReaderScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        val chNum = if (uiState.chapters.isNotEmpty()) {
+                            "Ch ${uiState.currentChapterIndex + 1}/${uiState.chapters.size} • ${uiState.webChapterPayload?.chapterTitle.orEmpty()}"
+                        } else {
+                            uiState.webChapterPayload?.chapterTitle.orEmpty()
+                        }
                         Text(
-                            text = uiState.chapterContent?.title ?: "",
+                            text = chNum,
                             style = MaterialTheme.typography.bodySmall,
                             color = theme.secondaryText,
                             maxLines = 1,
@@ -184,7 +173,6 @@ fun ReaderScreen(
                     ) {
                         Icon(Icons.Default.FormatSize, contentDescription = "Reader Appearance")
                     }
-                    // Required Export Audio (MP3) button directly in EPUB reader's top toolbar
                     IconButton(
                         onClick = {
                             val book = uiState.book ?: return@IconButton
@@ -200,7 +188,7 @@ fun ReaderScreen(
                         enabled = uiState.book != null,
                         modifier = Modifier.testTag("reader_export_audio_button")
                     ) {
-                        Icon(Icons.Default.AudioFile, contentDescription = "Export Audio (MP3)")
+                        Icon(Icons.Default.AudioFile, contentDescription = "Export Audio (MP3 / M4B)")
                     }
                 }
             )
@@ -241,80 +229,39 @@ fun ReaderScreen(
                             .padding(24.dp)
                     )
                 }
-                uiState.chapterContent != null -> {
-                    val content = uiState.chapterContent!!
-                    val fontFamily = if (readerSettings.useSerifFont) LiterataFontFamily else PlusJakartaSansFontFamily
-                    val activeGlobalIdx = if (isTtsPlayingThisBook) ttsState.sentenceIndex else -1
-
-                    LazyColumn(
-                        state = listState,
-                        contentPadding = PaddingValues(
-                            horizontal = readerSettings.horizontalMarginDp.dp,
-                            vertical = 22.dp
-                        ),
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("reader_chapter_content_list")
-                    ) {
-                        items(content.paragraphs, key = { "${content.index}_${it.index}" }) { para ->
-                            val annotated = remember(para, activeGlobalIdx, theme) {
-                                buildAnnotatedString {
-                                    var cursor = 0
-                                    for (s in para.sentences) {
-                                        if (s.startInParagraph > cursor) {
-                                            append(para.text.substring(cursor, s.startInParagraph))
-                                        }
-                                        if (s.globalIndex == activeGlobalIdx) {
-                                            withStyle(
-                                                SpanStyle(
-                                                    background = theme.highlightBg,
-                                                    color = theme.highlightText,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
-                                            ) {
-                                                append(para.text.substring(s.startInParagraph, s.endInParagraph))
-                                            }
-                                        } else {
-                                            append(para.text.substring(s.startInParagraph, s.endInParagraph))
-                                        }
-                                        cursor = s.endInParagraph
-                                    }
-                                    if (cursor < para.text.length) {
-                                        append(para.text.substring(cursor))
-                                    }
-                                }
-                            }
-
-                            val baseSize = if (para.isHeading) {
-                                (readerSettings.fontSizeSp + 5f).sp
-                            } else {
-                                readerSettings.fontSizeSp.sp
-                            }
-                            val lineHeight = (baseSize.value * readerSettings.lineSpacing).sp
-
-                            Text(
-                                text = annotated,
-                                style = TextStyle(
-                                    fontFamily = fontFamily,
-                                    fontSize = baseSize,
-                                    lineHeight = lineHeight,
-                                    fontWeight = if (para.isHeading) FontWeight.Bold else FontWeight.Normal,
-                                    color = theme.text
-                                ),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        val sentenceIdx = para.sentences.firstOrNull()?.globalIndex ?: 0
-                                        viewModel.playFromSentence(sentenceIdx)
-                                    }
-                            )
-                        }
-
-                        item {
-                            Spacer(Modifier.height(48.dp))
-                        }
+                uiState.webChapterPayload != null && uiState.book != null -> {
+                    val book = uiState.book!!
+                    val payload = uiState.webChapterPayload!!
+                    val activeGlobalIdx = if (isTtsPlayingThisBook && ttsState.chapterIndex == uiState.currentChapterIndex) {
+                        ttsState.sentenceIndex
+                    } else {
+                        -1
                     }
+
+                    EpubWebView(
+                        fileKey = book.fileKey,
+                        isDirectPath = book.isDirectPath,
+                        chapterPayload = payload,
+                        readerSettings = readerSettings,
+                        activeSentenceIndex = activeGlobalIdx,
+                        hasPrevChapter = uiState.currentChapterIndex > 0,
+                        hasNextChapter = uiState.currentChapterIndex < uiState.chapters.lastIndex,
+                        onSentenceTapped = { sentenceIdx ->
+                            viewModel.playFromSentence(sentenceIdx)
+                        },
+                        onPullPrevChapter = {
+                            if (uiState.currentChapterIndex > 0) {
+                                viewModel.selectChapter(uiState.currentChapterIndex - 1)
+                            }
+                        },
+                        onPullNextChapter = {
+                            if (uiState.currentChapterIndex < uiState.chapters.lastIndex) {
+                                viewModel.selectChapter(uiState.currentChapterIndex + 1)
+                            }
+                        },
+                        onScrollChanged = { y -> latestScrollY = y },
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
             }
         }

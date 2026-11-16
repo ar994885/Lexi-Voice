@@ -13,12 +13,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -36,6 +39,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sync
@@ -84,6 +88,7 @@ import kotlin.math.roundToInt
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
+    onOpenDrawer: () -> Unit,
     onOpenBook: (Long) -> Unit,
     onNavigateToFolders: () -> Unit,
     modifier: Modifier = Modifier
@@ -125,12 +130,15 @@ fun LibraryScreen(
 
     Scaffold(
         modifier = modifier,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         floatingActionButton = {
             FloatingActionButton(
                 onClick = { folderPickerLauncher.launch(null) },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.testTag("add_folder_fab")
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .testTag("add_folder_fab")
             ) {
                 Icon(Icons.Default.CreateNewFolder, contentDescription = "Add Book Folder")
             }
@@ -141,17 +149,24 @@ fun LibraryScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            // Editorial Header
+            // Editorial Header with Navigation Drawer Menu Button
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                    .statusBarsPadding()
+                    .padding(start = 6.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                IconButton(
+                    onClick = onOpenDrawer,
+                    modifier = Modifier.testTag("drawer_menu_button")
+                ) {
+                    Icon(Icons.Default.Menu, contentDescription = "Open Navigation Menu")
+                }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "LexiVoice Library",
-                        style = MaterialTheme.typography.headlineMedium,
+                        style = MaterialTheme.typography.headlineSmall,
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
@@ -241,7 +256,7 @@ fun LibraryScreen(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { viewModel.setSearchQuery(it) },
-                placeholder = { Text("Search 6,000+ books by title or author...") },
+                placeholder = { Text("Search books by title or author...") },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {

@@ -7,10 +7,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,6 +23,7 @@ import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,6 +68,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PasteAndSpeakScreen(
+    onOpenDrawer: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -98,8 +103,18 @@ fun PasteAndSpeakScreen(
 
     Scaffold(
         modifier = modifier,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                modifier = Modifier.statusBarsPadding(),
+                navigationIcon = {
+                    IconButton(
+                        onClick = onOpenDrawer,
+                        modifier = Modifier.testTag("drawer_menu_button")
+                    ) {
+                        Icon(Icons.Default.Menu, contentDescription = "Open Navigation Menu")
+                    }
+                },
                 title = { Text("Paste & Speak") },
                 actions = {
                     IconButton(
@@ -142,23 +157,25 @@ fun PasteAndSpeakScreen(
             )
         },
         bottomBar = {
-            TtsDockedBar(
-                ttsState = ttsState,
-                onOpenControlsSheet = { showTtsSheet = true },
-                onPlayClick = {
-                    if (isSpeakingScratchpad) {
-                        TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
-                    } else if (text.isNotBlank()) {
-                        readAlongMode = true
-                        scope.launch { prefsRepo.saveScratchpad(title, text) }
-                        TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_PLAY_SCRATCHPAD) {
-                            putExtra(TtsPlaybackService.EXTRA_TITLE, title.ifBlank { "Quick Read" })
-                            putExtra(TtsPlaybackService.EXTRA_TEXT, text)
-                            putExtra(TtsPlaybackService.EXTRA_SENTENCE_INDEX, 0)
+            androidx.compose.foundation.layout.Box(modifier = Modifier.navigationBarsPadding()) {
+                TtsDockedBar(
+                    ttsState = ttsState,
+                    onOpenControlsSheet = { showTtsSheet = true },
+                    onPlayClick = {
+                        if (isSpeakingScratchpad) {
+                            TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
+                        } else if (text.isNotBlank()) {
+                            readAlongMode = true
+                            scope.launch { prefsRepo.saveScratchpad(title, text) }
+                            TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_PLAY_SCRATCHPAD) {
+                                putExtra(TtsPlaybackService.EXTRA_TITLE, title.ifBlank { "New File" })
+                                putExtra(TtsPlaybackService.EXTRA_TEXT, text)
+                                putExtra(TtsPlaybackService.EXTRA_SENTENCE_INDEX, 0)
+                            }
                         }
                     }
-                }
-            )
+                )
+            }
         }
     ) { paddingValues ->
         Column(
@@ -222,7 +239,7 @@ fun PasteAndSpeakScreen(
                         scope.launch { prefsRepo.saveScratchpad(title, it) }
                     },
                     placeholder = {
-                        Text("Paste articles, notes, or copied text here to listen aloud or export to MP3 / M4A...")
+                        Text("Paste articles, notes, or copied text here to listen aloud or export to audio file...")
                     },
                     modifier = Modifier
                         .fillMaxWidth()

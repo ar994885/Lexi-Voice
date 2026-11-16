@@ -20,6 +20,7 @@ class FolderSyncWorker(
         val app = applicationContext as? LexiVoiceApplication ?: return Result.failure()
         return try {
             app.libraryRepository.syncAllFolders()
+            app.audiobookRepository.scanFoldersForM4b()
             Result.success()
         } catch (_: Exception) {
             Result.retry()

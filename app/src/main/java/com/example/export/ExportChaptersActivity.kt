@@ -8,8 +8,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -74,6 +76,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +85,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.documentfile.provider.DocumentFile
+import coil.compose.AsyncImage
+import java.io.File
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -187,18 +193,29 @@ private fun ExportChaptersScreen(
     var editChapterDraft by remember { mutableStateOf("") }
     var showOutputSheet by remember { mutableStateOf(false) }
 
-    // Advanced M4A & Folder state
+    // Advanced M4B Audiobook & Folder state
     var selectedFolderUri by remember { mutableStateOf("") }
     var selectedFolderName by remember { mutableStateOf("") }
-    var combineM4a by remember { mutableStateOf(false) }
+    var combineM4b by remember { mutableStateOf(false) }
     var keepMp3s by remember { mutableStateOf(true) }
-    var m4aTitle by remember { mutableStateOf(sourceTitle) }
-    var m4aAuthor by remember { mutableStateOf(sourceAuthor) }
-    var m4aAlbum by remember { mutableStateOf(sourceTitle) }
-    var m4aNarrator by remember { mutableStateOf("LexiVoice TTS") }
-    var m4aYear by remember { mutableStateOf("2026") }
-    var m4aGenre by remember { mutableStateOf("Audiobook") }
-    var m4aIncludeCover by remember { mutableStateOf(coverPath != null) }
+    var syncWithEpub by remember { mutableStateOf(fileKey.isNotBlank()) }
+    var m4bTitle by remember { mutableStateOf(sourceTitle) }
+    var m4bAuthor by remember { mutableStateOf(sourceAuthor) }
+    var m4bAlbum by remember { mutableStateOf(sourceTitle) }
+    var m4bNarrator by remember { mutableStateOf("LexiVoice TTS") }
+    var m4bYear by remember { mutableStateOf("2026") }
+    var m4bGenre by remember { mutableStateOf("Audiobook") }
+    var m4bIncludeCover by remember { mutableStateOf(true) }
+    var customCoverUri by remember { mutableStateOf<String?>(null) }
+
+    val pickCoverLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            customCoverUri = uri.toString()
+            m4bIncludeCover = true
+        }
+    }
 
     LaunchedEffect(savedFolders) {
         if (selectedFolderUri.isBlank() && savedFolders.isNotEmpty()) {
@@ -582,7 +599,7 @@ private fun ExportChaptersScreen(
                 OutlinedTextField(
                     value = editChapterDraft,
                     onValueChange = { editChapterDraft = it },
-                    label = { Text("Chapter Title (MP3 & M4A TOC)") },
+                    label = { Text("Chapter Title (MP3 & M4B TOC)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -697,7 +714,7 @@ private fun ExportChaptersScreen(
                 HorizontalDivider()
                 Spacer(Modifier.height(14.dp))
 
-                // Advanced M4A Audiobook Section
+                // Advanced M4B Audiobook Section
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -715,24 +732,24 @@ private fun ExportChaptersScreen(
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "Combine into Chaptered M4A Audiobook",
+                                text = "Export as Chaptered M4B Audiobook (.m4b)",
                                 style = MaterialTheme.typography.titleSmall
                             )
                             Text(
-                                text = "Merges selected MP3s using TOC names as chapter markers ($selectedCount chapters)",
+                                text = "Builds AAC .m4b with exact chapter timestamps ($selectedCount ch) & synced text highlight",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
                     Switch(
-                        checked = combineM4a,
-                        onCheckedChange = { combineM4a = it },
-                        modifier = Modifier.testTag("toggle_combine_m4a")
+                        checked = combineM4b,
+                        onCheckedChange = { combineM4b = it },
+                        modifier = Modifier.testTag("toggle_combine_m4b")
                     )
                 }
 
-                if (combineM4a) {
+                if (combineM4b) {
                     Spacer(Modifier.height(10.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -746,17 +763,91 @@ private fun ExportChaptersScreen(
                         Switch(checked = keepMp3s, onCheckedChange = { keepMp3s = it })
                     }
 
-                    Spacer(Modifier.height(10.dp))
+                    if (fileKey.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Sync M4B with EPUB read-along highlight",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                Text(
+                                    text = "Saves exact sentence timing JSON for the M4B Player",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(checked = syncWithEpub, onCheckedChange = { syncWithEpub = it })
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
                     Text(
-                        text = "M4A Audiobook Metadata",
+                        text = "M4B Audiobook Metadata & Cover Art",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.secondary
                     )
                     Spacer(Modifier.height(8.dp))
 
+                    // Cover art preview + PickVisualMedia selector
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        val coverModel: Any? = when {
+                            !m4bIncludeCover -> null
+                            customCoverUri != null -> Uri.parse(customCoverUri)
+                            coverPath != null -> File(coverPath).takeIf { it.exists() }
+                            else -> null
+                        }
+                        if (coverModel != null) {
+                            AsyncImage(
+                                model = coverModel,
+                                contentDescription = "Audiobook Cover Preview",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(width = 56.dp, height = 78.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("Embed Cover Art", style = MaterialTheme.typography.bodyMedium)
+                                Switch(checked = m4bIncludeCover, onCheckedChange = { m4bIncludeCover = it })
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        pickCoverLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("pick_m4b_cover_button")
+                                ) {
+                                    Text(if (customCoverUri != null) "Change Cover" else "Choose Image")
+                                }
+                                if (customCoverUri != null) {
+                                    TextButton(onClick = { customCoverUri = null }) {
+                                        Text("Reset")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(10.dp))
                     OutlinedTextField(
-                        value = m4aTitle,
-                        onValueChange = { m4aTitle = it },
+                        value = m4bTitle,
+                        onValueChange = { m4bTitle = it },
                         label = { Text("Audiobook Title") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -764,15 +855,15 @@ private fun ExportChaptersScreen(
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
-                            value = m4aAuthor,
-                            onValueChange = { m4aAuthor = it },
+                            value = m4bAuthor,
+                            onValueChange = { m4bAuthor = it },
                             label = { Text("Author") },
                             singleLine = true,
                             modifier = Modifier.weight(1f)
                         )
                         OutlinedTextField(
-                            value = m4aNarrator,
-                            onValueChange = { m4aNarrator = it },
+                            value = m4bNarrator,
+                            onValueChange = { m4bNarrator = it },
                             label = { Text("Narrator") },
                             singleLine = true,
                             modifier = Modifier.weight(1f)
@@ -780,8 +871,8 @@ private fun ExportChaptersScreen(
                     }
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
-                        value = m4aAlbum,
-                        onValueChange = { m4aAlbum = it },
+                        value = m4bAlbum,
+                        onValueChange = { m4bAlbum = it },
                         label = { Text("Album / Series") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -789,34 +880,19 @@ private fun ExportChaptersScreen(
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
-                            value = m4aYear,
-                            onValueChange = { m4aYear = it },
+                            value = m4bYear,
+                            onValueChange = { m4bYear = it },
                             label = { Text("Year") },
                             singleLine = true,
                             modifier = Modifier.weight(0.4f)
                         )
                         OutlinedTextField(
-                            value = m4aGenre,
-                            onValueChange = { m4aGenre = it },
+                            value = m4bGenre,
+                            onValueChange = { m4bGenre = it },
                             label = { Text("Genre") },
                             singleLine = true,
                             modifier = Modifier.weight(0.6f)
                         )
-                    }
-
-                    if (coverPath != null) {
-                        Spacer(Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Embed book cover artwork into M4A",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Switch(checked = m4aIncludeCover, onCheckedChange = { m4aIncludeCover = it })
-                        }
                     }
                 }
 
@@ -844,15 +920,17 @@ private fun ExportChaptersScreen(
                                 )
                             },
                             m4aMetadata = M4aMetadataConfig(
-                                enabled = combineM4a,
+                                enabled = combineM4b,
                                 keepMp3Files = keepMp3s,
-                                title = m4aTitle,
-                                author = m4aAuthor,
-                                album = m4aAlbum,
-                                narrator = m4aNarrator,
-                                year = m4aYear,
-                                genre = m4aGenre,
-                                includeCover = m4aIncludeCover
+                                syncWithEpub = syncWithEpub,
+                                title = m4bTitle,
+                                author = m4bAuthor,
+                                album = m4bAlbum,
+                                narrator = m4bNarrator,
+                                year = m4bYear,
+                                genre = m4bGenre,
+                                includeCover = m4bIncludeCover,
+                                coverOverrideUri = customCoverUri
                             ),
                             enginePackage = ttsState.selectedEnginePackage,
                             voiceName = ttsState.selectedVoiceName,
@@ -870,8 +948,9 @@ private fun ExportChaptersScreen(
                         .testTag("start_batch_export_button")
                 ) {
                     Text(
-                        text = if (combineM4a) {
-                            "Start Export ($selectedCount Ch → MP3 + M4A)"
+                        text = if (combineM4b) {
+                            if (keepMp3s) "Start Export ($selectedCount Ch → MP3 + M4B)"
+                            else "Build M4B Audiobook ($selectedCount Ch)"
                         } else {
                             "Start Batch MP3 Export ($selectedCount Ch)"
                         }
