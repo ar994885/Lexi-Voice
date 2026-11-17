@@ -30,7 +30,7 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
             context = this,
             audiobookDao = database.audiobookDao(),
             folderDao = database.folderDao(),
-            preferencesRepository = preferencesRepository
+            preferencesRepository = preferencesRepository,
             libraryRepository = libraryRepository
         )
     }

@@ -292,7 +292,7 @@ class AudioExportService : Service() {
                                 artist = bookAuthor,
                                 album = config.m4aMetadata.album.ifBlank { bookTitle },
                                 trackNumber = fileOrderNum,
-                                bitrateKbps = 96
+                                bitrateKbps = 96,
                                 coverBytes = coverBytes
                             )
                             if (mp3Ok) {
@@ -388,7 +388,7 @@ class AudioExportService : Service() {
                             artist = bookAuthor,
                             album = config.m4aMetadata.album.ifBlank { bookTitle },
                             trackNumber = fileOrderNum,
-                            bitrateKbps = 96
+                            bitrateKbps = 96,
                             coverBytes = coverBytes
                         )
                         wavChunkFiles.forEach { it.delete() }
