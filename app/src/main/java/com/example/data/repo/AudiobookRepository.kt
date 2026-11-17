@@ -34,7 +34,8 @@ class AudiobookRepository(
     private val context: Context,
     private val audiobookDao: AudiobookDao,
     private val folderDao: FolderDao,
-    private val preferencesRepository: PreferencesRepository? = null
+    private val preferencesRepository: PreferencesRepository? = null,
+    private val libraryRepository: LibraryRepository? = null
 ) {
     val audiobooks: Flow<List<AudiobookEntity>> = audiobookDao.observeAllAudiobooks()
 
@@ -124,6 +125,33 @@ class AudiobookRepository(
         } else null
 
         val existing = audiobookDao.getAudiobookByUri(folderKey)
+
+        // Resolve local EPUB key on this device (falling back to Book Title match across devices)
+        var resolvedEpubKey = syncMap.sourceEpubKey ?: existing?.sourceEpubKey
+        var resolvedEpubDirect = if (syncMap.sourceEpubKey != null) syncMap.sourceEpubIsDirect else (existing?.sourceEpubIsDirect ?: false)
+
+        if (libraryRepository != null) {
+            val localMatchByKey = resolvedEpubKey?.let { libraryRepository.getBookByFileKey(it) }
+            if (localMatchByKey == null && syncMap.bookTitle.isNotBlank()) {
+                val localMatchByTitle = runCatching {
+                    libraryRepository.observeLibraryBooks(
+                        searchQuery = syncMap.bookTitle,
+                        folderFilter = null,
+                        sortOption = com.example.data.db.LibrarySortOption.RECENT
+                    ).first().firstOrNull {
+                        it.title.equals(syncMap.bookTitle, ignoreCase = true)
+                    }
+                }.getOrNull()
+                if (localMatchByTitle != null) {
+                    resolvedEpubKey = localMatchByTitle.fileKey
+                    resolvedEpubDirect = localMatchByTitle.isDirectPath
+                }
+            }
+        }
+
+        val validCoverPath = syncMap.coverPath?.takeIf { File(it).exists() }
+            ?: existing?.coverPath?.takeIf { File(it).exists() }
+
         val entity = AudiobookEntity(
             id = existing?.id ?: 0L,
             fileUri = folderKey,
@@ -133,12 +161,12 @@ class AudiobookRepository(
             narrator = syncMap.narrator,
             year = syncMap.year,
             genre = syncMap.genre,
-            coverPath = syncMap.coverPath ?: existing?.coverPath,
+            coverPath = validCoverPath,
             durationMs = flattened.totalDurationMs,
             chapterCount = flattened.chapterFiles.size.coerceAtLeast(flattened.chapters.size).coerceAtLeast(1),
             chaptersJson = SyncAlignmentSerializer.encodeChapters(flattened.chapters),
-            sourceEpubKey = syncMap.sourceEpubKey ?: existing?.sourceEpubKey,
-            sourceEpubIsDirect = if (syncMap.sourceEpubKey != null) syncMap.sourceEpubIsDirect else (existing?.sourceEpubIsDirect ?: false),
+            sourceEpubKey = resolvedEpubKey,
+            sourceEpubIsDirect = resolvedEpubDirect,
             syncJsonPath = syncFile ?: existing?.syncJsonPath,
             isFolderAudiobook = true,
             folderUri = folderUri,
@@ -149,6 +177,7 @@ class AudiobookRepository(
         )
         audiobookDao.upsertAudiobookPreservingProgress(entity)
     }
+
 
     suspend fun importM4bUri(uri: Uri): AudiobookEntity? = withContext(Dispatchers.IO) {
         val key = uri.toString()
@@ -192,15 +221,16 @@ class AudiobookRepository(
         }.getOrDefault(emptyList())
 
         val scannedSafTrees = HashSet<String>()
+        val discoveredFolderKeys = HashSet<String>()
 
         for (folder in watched) {
             if (folder.isDirectPath) {
-                scanDirectDirectoryForAudiobooks(File(folder.uriOrPath))
+                scanDirectDirectoryForAudiobooks(File(folder.uriOrPath), discoveredFolderKeys)
             } else {
                 if (scannedSafTrees.add(folder.uriOrPath)) {
                     val treeUri = Uri.parse(folder.uriOrPath)
                     val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: continue
-                    scanSafDirectoryForAudiobooks(treeUri, rootId)
+                    scanSafDirectoryForAudiobooks(treeUri, rootId, discoveredFolderKeys)
                 }
             }
         }
@@ -209,14 +239,28 @@ class AudiobookRepository(
             if (scannedSafTrees.add(uriStr)) {
                 val treeUri = Uri.parse(uriStr)
                 val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: continue
-                scanSafDirectoryForAudiobooks(treeUri, rootId)
+                scanSafDirectoryForAudiobooks(treeUri, rootId, discoveredFolderKeys)
+            }
+        }
+
+        // Remove stale/renamed folder rows from Room (never deletes files on storage)
+        if (watched.isNotEmpty() || exportFolderUris.isNotEmpty()) {
+            val allExisting = runCatching { audiobookDao.observeAllAudiobooks().first() }.getOrDefault(emptyList())
+            for (item in allExisting) {
+                if (item.isFolderAudiobook && item.fileUri !in discoveredFolderKeys) {
+                    audiobookDao.deleteAudiobook(item.id)
+                }
             }
         }
     }
 
+
     suspend fun scanFoldersForM4b() = scanFoldersForAudiobooks()
 
-    private suspend fun scanDirectDirectoryForAudiobooks(root: File) {
+    private suspend fun scanDirectDirectoryForAudiobooks(
+        root: File,
+        discoveredFolderKeys: MutableSet<String>
+    ) {
         if (!root.exists() || !root.isDirectory) return
 
         val queue = ArrayDeque<File>()
@@ -266,6 +310,7 @@ class AudiobookRepository(
                     runCatching { SyncAlignmentSerializer.decodeBookSyncMap(it.readText()) }.getOrNull()
                 }
                 val syncMap = buildBookSyncMapFromDirectMp3s(dir, mp3Files, existingSync)
+                discoveredFolderKeys.add("folder://${dir.absolutePath}")
                 registerExportedMp3Folder(
                     folderUri = dir.absolutePath,
                     isDirectPath = true,
@@ -275,7 +320,12 @@ class AudiobookRepository(
         }
     }
 
-    private suspend fun scanSafDirectoryForAudiobooks(treeUri: Uri, rootDocId: String) {
+
+    private suspend fun scanSafDirectoryForAudiobooks(
+        treeUri: Uri,
+        rootDocId: String,
+        discoveredFolderKeys: MutableSet<String>
+    ) {
         val queue = ArrayDeque<Pair<String, String>>()
         queue.add(rootDocId to "Audiobooks")
         val proj = arrayOf(
@@ -336,6 +386,7 @@ class AudiobookRepository(
                     mp3Docs = mp3Docs,
                     existingSync = existingSync
                 )
+                discoveredFolderKeys.add("folder://$dirUri")
                 registerExportedMp3Folder(
                     folderUri = dirUri.toString(),
                     isDirectPath = false,
@@ -344,6 +395,8 @@ class AudiobookRepository(
             }
         }
     }
+
+
 
     private fun buildBookSyncMapFromDirectMp3s(
         dir: File,
@@ -354,7 +407,7 @@ class AudiobookRepository(
         val existingByName = existingSync?.chapters.orEmpty().associateBy { it.fileName }
         var detectedAlbum = existingSync?.bookTitle.orEmpty()
         var detectedArtist = existingSync?.author.orEmpty()
-        var detectedCoverPath = existingSync?.coverPath
+        var detectedCoverPath = existingSync?.coverPath?.takeIf { File(it).exists() }
 
         val chapterEntries = sorted.mapIndexed { idx, file ->
             val prev = existingByName[file.name]
@@ -397,12 +450,13 @@ class AudiobookRepository(
         val existingByName = existingSync?.chapters.orEmpty().associateBy { it.fileName }
         var detectedAlbum = existingSync?.bookTitle.orEmpty()
         var detectedArtist = existingSync?.author.orEmpty()
-        var detectedCoverPath = existingSync?.coverPath
+        var detectedCoverPath = existingSync?.coverPath?.takeIf { File(it).exists() }
 
         val chapterEntries = sorted.mapIndexed { idx, (_, name, uri) ->
             val prev = existingByName[name]
-            val meta = if (prev != null && prev.durationMs > 0L && detectedAlbum.isNotBlank()) {
-                ParsedMp3Info(prev.title, detectedArtist, detectedAlbum, prev.durationMs, null)
+            val needMeta = prev == null || prev.durationMs <= 0L || detectedAlbum.isBlank() || detectedCoverPath == null
+            val meta = if (!needMeta) {
+                ParsedMp3Info(prev!!.title, detectedArtist, detectedAlbum, prev.durationMs, null)
             } else {
                 inspectMp3FromUri(uri, name.removeSuffix(".mp3").removeSuffix(".MP3"))
             }

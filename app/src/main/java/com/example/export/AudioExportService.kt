@@ -293,6 +293,7 @@ class AudioExportService : Service() {
                                 album = config.m4aMetadata.album.ifBlank { bookTitle },
                                 trackNumber = fileOrderNum,
                                 bitrateKbps = 96
+                                coverBytes = coverBytes
                             )
                             if (mp3Ok) {
                                 savedMp3Uri = writeFileToSafFolder(bookSubfolder, tempMp3, "audio/mpeg", mp3FileName)
@@ -388,6 +389,7 @@ class AudioExportService : Service() {
                             album = config.m4aMetadata.album.ifBlank { bookTitle },
                             trackNumber = fileOrderNum,
                             bitrateKbps = 96
+                            coverBytes = coverBytes
                         )
                         wavChunkFiles.forEach { it.delete() }
                         if (mp3Ok) {
@@ -559,8 +561,6 @@ class AudioExportService : Service() {
     }
 
     private fun resolveCoverArtBytes(config: ExportBatchConfig): Pair<ByteArray?, String?> {
-        if (!config.m4aMetadata.includeCover) return null to config.coverPath
-
         val overrideUri = config.m4aMetadata.coverOverrideUri
         if (!overrideUri.isNullOrBlank()) {
             val bytes = runCatching {

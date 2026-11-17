@@ -104,6 +104,7 @@ class M4bPlaybackService : Service() {
     private var sleepEndTimeMs: Long = 0L
     private var lastChapterForSleep: Int = -1
     private var lastSavedTick: Long = 0L
+    private var wasPausedByUser: Boolean = false
 
     private var loadedBookId: Long = -1L
     private var isPlaylistMode: Boolean = false
@@ -575,9 +576,18 @@ class M4bPlaybackService : Service() {
                     }
                 }
                 player.prepare()
-            } else if (player.playbackState == Player.STATE_IDLE) {
-                player.prepare()
+            } else {
+                if (player.playbackState == Player.STATE_IDLE) {
+                    player.prepare()
+                }
+                if (wasPausedByUser) {
+                    val currentGlobal = computeGlobalPositionMs(player)
+                    if (currentGlobal > 1_000L) {
+                        seekToGlobal(currentGlobal - 1_000L)
+                    }
+                }
             }
+            wasPausedByUser = false
             player.play()
             startForeground(NOTIFICATION_ID, buildNotification())
             startPositionPoller()
@@ -585,6 +595,7 @@ class M4bPlaybackService : Service() {
     }
 
     private fun pausePlayback() {
+        wasPausedByUser = true
         exoPlayer?.pause()
         persistProgressNow()
         updateMediaSessionAndNotification()

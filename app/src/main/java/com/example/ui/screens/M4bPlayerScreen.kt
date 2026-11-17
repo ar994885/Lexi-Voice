@@ -85,6 +85,7 @@ import com.example.ui.components.EpubWebView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -99,6 +100,10 @@ fun M4bPlayerScreen(
     val playerState by M4bPlayerStateHolder.state.collectAsStateWithLifecycle()
     val overlayState by FloatingOverlayController.state.collectAsStateWithLifecycle()
     val readerSettings by app.preferencesRepository.readerSettings.collectAsStateWithLifecycle(ReaderSettings())
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val rewindSec = readerSettings.audiobookRewindSeconds
+    val forwardSec = readerSettings.audiobookForwardSeconds
+
 
     var showChaptersSheet by remember { mutableStateOf(false) }
     var showSpeedSleepSheet by remember { mutableStateOf(false) }
@@ -318,15 +323,18 @@ fun M4bPlayerScreen(
                         ) {
                             Icon(Icons.Default.SkipPrevious, contentDescription = "Previous Chapter")
                         }
-                        IconButton(
+                        androidx.compose.material3.TextButton(
                             onClick = {
                                 M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SKIP_BY) {
-                                    putExtra(M4bPlaybackService.EXTRA_DELTA_MS, -15_000L)
+                                    putExtra(M4bPlaybackService.EXTRA_DELTA_MS, -(rewindSec * 1000L))
                                 }
                             },
                             modifier = Modifier.testTag("m4b_rewind_15_button")
                         ) {
-                            Icon(Icons.Default.Replay10, contentDescription = "Rewind 15 seconds")
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.Replay10, contentDescription = "Rewind $rewindSec seconds")
+                                Text("-${rewindSec}s", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                         FilledIconButton(
                             onClick = {
@@ -341,15 +349,18 @@ fun M4bPlayerScreen(
                                 contentDescription = if (playerState.isPlaying) "Pause" else "Play"
                             )
                         }
-                        IconButton(
+                        androidx.compose.material3.TextButton(
                             onClick = {
                                 M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SKIP_BY) {
-                                    putExtra(M4bPlaybackService.EXTRA_DELTA_MS, 30_000L)
+                                    putExtra(M4bPlaybackService.EXTRA_DELTA_MS, forwardSec * 1000L)
                                 }
                             },
                             modifier = Modifier.testTag("m4b_forward_30_button")
                         ) {
-                            Icon(Icons.Default.Forward30, contentDescription = "Forward 30 seconds")
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.Forward30, contentDescription = "Forward $forwardSec seconds")
+                                Text("+${forwardSec}s", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                         IconButton(
                             onClick = {
@@ -360,6 +371,7 @@ fun M4bPlayerScreen(
                             Icon(Icons.Default.SkipNext, contentDescription = "Next Chapter")
                         }
                     }
+
                 }
             }
         }
@@ -580,11 +592,95 @@ fun M4bPlayerScreen(
 
                 HorizontalDivider()
 
+                Text("Skip Intervals (Rewind / Forward)", style = MaterialTheme.typography.titleMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Rewind:", style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(64.dp))
+                    listOf(5, 10, 15, 30).forEach { sec ->
+                        FilterChip(
+                            selected = rewindSec == sec,
+                            onClick = {
+                                scope.launch {
+                                    app.preferencesRepository.updateReaderSettings {
+                                        it.copy(audiobookRewindSeconds = sec)
+                                    }
+                                }
+                            },
+                            label = { Text("${sec}s") }
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Forward:", style = MaterialTheme.typography.labelLarge, modifier = Modifier.width(64.dp))
+                    listOf(5, 10, 15, 30, 60).forEach { sec ->
+                        FilterChip(
+                            selected = forwardSec == sec,
+                            onClick = {
+                                scope.launch {
+                                    app.preferencesRepository.updateReaderSettings {
+                                        it.copy(audiobookForwardSeconds = sec)
+                                    }
+                                }
+                            },
+                            label = { Text("${sec}s") }
+                        )
+                    }
+                }
+                var customRewind by remember(rewindSec) { mutableStateOf(rewindSec.toString()) }
+                var customForward by remember(forwardSec) { mutableStateOf(forwardSec.toString()) }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = customRewind,
+                        onValueChange = {
+                            customRewind = it.filter { c -> c.isDigit() }.take(3)
+                            customRewind.toIntOrNull()?.coerceIn(1, 300)?.let { v ->
+                                scope.launch {
+                                    app.preferencesRepository.updateReaderSettings { it.copy(audiobookRewindSeconds = v) }
+                                }
+                            }
+                        },
+                        label = { Text("Rewind (s)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = customForward,
+                        onValueChange = {
+                            customForward = it.filter { c -> c.isDigit() }.take(3)
+                            customForward.toIntOrNull()?.coerceIn(1, 300)?.let { v ->
+                                scope.launch {
+                                    app.preferencesRepository.updateReaderSettings { it.copy(audiobookForwardSeconds = v) }
+                                }
+                            }
+                        },
+                        label = { Text("Forward (s)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                HorizontalDivider()
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Bedtime, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(8.dp))
                     Text("Sleep Timer", style = MaterialTheme.typography.titleMedium)
                 }
+
+
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = playerState.sleepTimerMode == SleepTimerMode.OFF,

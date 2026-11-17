@@ -25,7 +25,8 @@ object Mp3AudioEncoder {
         artist: String,
         album: String,
         trackNumber: Int,
-        bitrateKbps: Int = 96
+        bitrateKbps: Int = 96,
+        coverBytes: ByteArray? = null
     ): Boolean {
         if (wavFiles.isEmpty()) return false
         var bridge: Jump3rBridge? = null
@@ -88,10 +89,94 @@ object Mp3AudioEncoder {
             }
 
             bridge?.close()
+            if (outputMp3.exists() && outputMp3.length() > 0L && coverBytes != null && coverBytes.isNotEmpty()) {
+                prependId3v2WithCover(
+                    mp3File = outputMp3,
+                    title = title,
+                    artist = artist,
+                    album = album,
+                    trackNumber = trackNumber,
+                    coverJpegBytes = coverBytes
+                )
+            }
             outputMp3.exists() && outputMp3.length() > 0L
         } catch (_: Exception) {
             runCatching { bridge?.close() }
             false
+        }
+    }
+
+    private fun prependId3v2WithCover(
+        mp3File: File,
+        title: String,
+        artist: String,
+        album: String,
+        trackNumber: Int,
+        coverJpegBytes: ByteArray
+    ) {
+        runCatching {
+            val rawMp3 = mp3File.readBytes()
+            val audioStart = if (rawMp3.size >= 10 &&
+                rawMp3[0] == 'I'.code.toByte() &&
+                rawMp3[1] == 'D'.code.toByte() &&
+                rawMp3[2] == '3'.code.toByte()
+            ) {
+                val tagSize = ((rawMp3[6].toInt() and 0x7F) shl 21) or
+                    ((rawMp3[7].toInt() and 0x7F) shl 14) or
+                    ((rawMp3[8].toInt() and 0x7F) shl 7) or
+                    (rawMp3[9].toInt() and 0x7F)
+                (10 + tagSize).coerceAtMost(rawMp3.size)
+            } else 0
+
+            fun textFrame(id: String, value: String): ByteArray {
+                val textBytes = value.toByteArray(Charsets.UTF_8)
+                val payloadSize = 1 + textBytes.size
+                val buf = ByteBuffer.allocate(10 + payloadSize).order(ByteOrder.BIG_ENDIAN)
+                buf.put(id.toByteArray(Charsets.US_ASCII))
+                buf.putInt(payloadSize)
+                buf.putShort(0)
+                buf.put(3) // UTF-8 encoding
+                buf.put(textBytes)
+                return buf.array()
+            }
+
+            val mimeBytes = "image/jpeg".toByteArray(Charsets.US_ASCII)
+            val apicPayloadSize = 1 + mimeBytes.size + 1 + 1 + 1 + coverJpegBytes.size
+            val apicBuf = ByteBuffer.allocate(10 + apicPayloadSize).order(ByteOrder.BIG_ENDIAN)
+            apicBuf.put("APIC".toByteArray(Charsets.US_ASCII))
+            apicBuf.putInt(apicPayloadSize)
+            apicBuf.putShort(0)
+            apicBuf.put(0) // ISO-8859-1
+            apicBuf.put(mimeBytes)
+            apicBuf.put(0) // null terminator
+            apicBuf.put(3) // Front Cover picture type
+            apicBuf.put(0) // empty description
+            apicBuf.put(coverJpegBytes)
+
+            val frames = listOf(
+                textFrame("TIT2", title),
+                textFrame("TPE1", artist),
+                textFrame("TALB", album),
+                textFrame("TRCK", trackNumber.toString()),
+                apicBuf.array()
+            )
+            val totalTagPayload = frames.sumOf { it.size }
+            val header = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN).apply {
+                put("ID3".toByteArray(Charsets.US_ASCII))
+                put(3) // ID3v2.3
+                put(0)
+                put(0)
+                put(((totalTagPayload shr 21) and 0x7F).toByte())
+                put(((totalTagPayload shr 14) and 0x7F).toByte())
+                put(((totalTagPayload shr 7) and 0x7F).toByte())
+                put((totalTagPayload and 0x7F).toByte())
+            }.array()
+
+            FileOutputStream(mp3File).use { out ->
+                out.write(header)
+                for (f in frames) out.write(f)
+                out.write(rawMp3, audioStart, rawMp3.size - audioStart)
+            }
         }
     }
 

@@ -211,7 +211,6 @@ object EpubParser {
         val chapterDir = chapterHref.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
         val baseUrl = "$ASSET_BASE_URL$chapterDir"
 
-        // Ensure head exists and inject base + non-destructive reader CSS hooks
         val head = doc.head()
         if (head.selectFirst("meta[name=viewport]") == null) {
             head.prependElement("meta")
@@ -227,14 +226,13 @@ object EpubParser {
         var paraIdx = 0
 
         val body = doc.body()
-        // Walk all text nodes in DOM order, skipping script/style/svg/title
         val skipTags = setOf("script", "style", "svg", "title", "noscript")
         val textNodes = mutableListOf<TextNode>()
 
         fun collectTextNodes(node: Node) {
             if (node is Element && node.tagName().lowercase(Locale.ROOT) in skipTags) return
             if (node is TextNode) {
-                if (!node.isBlank) textNodes.add(node)
+                if (node.wholeText.isNotEmpty()) textNodes.add(node)
                 return
             }
             for (child in node.childNodes()) {
@@ -243,8 +241,7 @@ object EpubParser {
         }
         collectTextNodes(body)
 
-        // Group text nodes by nearest block container so paragraph context is preserved for TTS & overlay
-        val blockTags = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "pre", "div", "section")
+        val blockTags = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "pre", "div", "section", "dt", "dd")
         fun nearestBlock(node: Node): Element {
             var curr = node.parent()
             while (curr is Element && curr != body) {
@@ -259,48 +256,97 @@ object EpubParser {
             groupedByBlock.getOrPut(nearestBlock(tn)) { mutableListOf() }.add(tn)
         }
 
+        data class NodeSpanRange(
+            val node: TextNode,
+            val rawText: String,
+            val startInConcat: Int,
+            val endInConcat: Int
+        )
+
         for ((blockEl, nodes) in groupedByBlock) {
             val blockText = blockEl.text().replace(Regex("\\s+"), " ").trim()
             if (blockText.isNotBlank()) plainBlocks.add(blockText)
 
-            val blockSentences = mutableListOf<ReaderSentence>()
-            var offsetInPara = 0
+            val concatBuilder = StringBuilder()
+            val nodeRanges = mutableListOf<NodeSpanRange>()
             for (tn in nodes) {
-                val rawText = tn.wholeText
-                val split = splitPreservingWhitespace(rawText)
-                if (split.isEmpty()) continue
+                val raw = tn.wholeText
+                val start = concatBuilder.length
+                concatBuilder.append(raw)
+                nodeRanges.add(NodeSpanRange(tn, raw, start, concatBuilder.length))
+            }
+
+            val fullBlockRaw = concatBuilder.toString()
+            if (fullBlockRaw.isBlank()) continue
+
+            val splitSentences = splitPreservingWhitespace(fullBlockRaw)
+            val blockSentences = mutableListOf<ReaderSentence>()
+
+            data class SentenceRange(val sentIdx: Int, val start: Int, val end: Int)
+            val sentenceRanges = mutableListOf<SentenceRange>()
+
+            var cursor = 0
+            var offsetInPara = 0
+            for ((isSentence, chunk) in splitSentences) {
+                val chunkStart = cursor
+                val chunkEnd = cursor + chunk.length
+                cursor = chunkEnd
+
+                if (isSentence) {
+                    val sIdx = globalSentenceIdx++
+                    val cleanText = chunk.replace(Regex("\\s+"), " ").trim()
+                    val startPos = offsetInPara
+                    offsetInPara += cleanText.length + 1
+                    val sentenceObj = ReaderSentence(
+                        globalIndex = sIdx,
+                        paragraphIndex = paraIdx,
+                        startInParagraph = startPos,
+                        endInParagraph = startPos + cleanText.length,
+                        text = cleanText
+                    )
+                    sentences.add(sentenceObj)
+                    blockSentences.add(sentenceObj)
+                    sentenceRanges.add(SentenceRange(sIdx, chunkStart, chunkEnd))
+                }
+            }
+
+            if (sentenceRanges.isEmpty()) continue
+
+            for (nr in nodeRanges) {
+                if (nr.rawText.isEmpty()) continue
+                val overlapping = sentenceRanges.filter { it.end > nr.startInConcat && it.start < nr.endInConcat }
+                if (overlapping.isEmpty()) continue
 
                 val replacementNodes = mutableListOf<Node>()
-                for ((isSentence, chunk) in split) {
-                    if (!isSentence) {
-                        replacementNodes.add(TextNode(chunk))
-                    } else {
-                        val sIdx = globalSentenceIdx++
-                        val cleanText = chunk.replace(Regex("\\s+"), " ").trim()
-                        val startPos = offsetInPara
-                        offsetInPara += cleanText.length + 1
-                        val sentenceObj = ReaderSentence(
-                            globalIndex = sIdx,
-                            paragraphIndex = paraIdx,
-                            startInParagraph = startPos,
-                            endInParagraph = startPos + cleanText.length,
-                            text = cleanText
-                        )
-                        sentences.add(sentenceObj)
-                        blockSentences.add(sentenceObj)
+                var localCursor = 0
 
+                for (sr in overlapping) {
+                    val overlapStartLocal = (sr.start - nr.startInConcat).coerceIn(0, nr.rawText.length)
+                    val overlapEndLocal = (sr.end - nr.startInConcat).coerceIn(0, nr.rawText.length)
+
+                    if (overlapStartLocal > localCursor) {
+                        replacementNodes.add(TextNode(nr.rawText.substring(localCursor, overlapStartLocal)))
+                    }
+                    if (overlapEndLocal > overlapStartLocal) {
+                        val piece = nr.rawText.substring(overlapStartLocal, overlapEndLocal)
                         val span = Element("span")
                             .addClass("lexi-s")
-                            .attr("data-idx", sIdx.toString())
-                            .text(chunk)
+                            .attr("data-idx", sr.sentIdx.toString())
+                            .text(piece)
                         replacementNodes.add(span)
                     }
+                    localCursor = overlapEndLocal
                 }
+
+                if (localCursor < nr.rawText.length) {
+                    replacementNodes.add(TextNode(nr.rawText.substring(localCursor)))
+                }
+
                 if (replacementNodes.isNotEmpty()) {
                     for (rep in replacementNodes) {
-                        tn.before(rep)
+                        nr.node.before(rep)
                     }
-                    tn.remove()
+                    nr.node.remove()
                 }
             }
 
@@ -319,7 +365,6 @@ object EpubParser {
             }
         }
 
-        // Inject JS helper for highlighting, delegated sentence tap, and selection detection
         body.appendChild(
             Element("script").appendChild(
                 DataNode(
@@ -331,12 +376,12 @@ object EpubParser {
                           prev[i].classList.remove('lexi-active');
                         }
                         if (idx < 0) return;
-                        var target = document.querySelector('.lexi-s[data-idx="' + idx + '"]');
-                        if (target) {
-                          target.classList.add('lexi-active');
-                          if (shouldScroll) {
-                            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                          }
+                        var targets = document.querySelectorAll('.lexi-s[data-idx="' + idx + '"]');
+                        for (var j = 0; j < targets.length; j++) {
+                          targets[j].classList.add('lexi-active');
+                        }
+                        if (shouldScroll && targets.length > 0) {
+                          targets[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
                         }
                       };
                       document.addEventListener('click', function(ev) {
@@ -378,6 +423,7 @@ object EpubParser {
             plainText = plainBlocks.joinToString("\n\n")
         )
     }
+
 
     /**
      * Reads internal CSS, image, SVG, or font resources directly from an EPUB Zip archive

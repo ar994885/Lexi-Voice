@@ -22,7 +22,9 @@ data class ReaderSettings(
     val lineSpacing: Float = 1.45f,
     val themeMode: ReaderThemeMode = ReaderThemeMode.SEPIA,
     val horizontalMarginDp: Int = 20,
-    val useSerifFont: Boolean = true
+    val useSerifFont: Boolean = true,
+    val audiobookRewindSeconds: Int = 10,
+    val audiobookForwardSeconds: Int = 30
 )
 
 data class TtsSettings(
@@ -77,6 +79,9 @@ class PreferencesRepository(private val context: Context) {
         val OVERLAY_BG_ARGB = intPreferencesKey("overlay_bg_argb")
         val OVERLAY_BORDER_ARGB = intPreferencesKey("overlay_border_argb")
         val OVERLAY_BORDER_WIDTH_DP = intPreferencesKey("overlay_border_width_dp")
+
+        val AUDIOBOOK_REWIND_SEC = intPreferencesKey("audiobook_rewind_sec")
+        val AUDIOBOOK_FORWARD_SEC = intPreferencesKey("audiobook_forward_sec")
     }
 
     val readerSettings: Flow<ReaderSettings> = context.dataStore.data.map { prefs ->
@@ -87,7 +92,9 @@ class PreferencesRepository(private val context: Context) {
             lineSpacing = prefs[Keys.READER_LINE_SPACING] ?: 1.45f,
             themeMode = theme,
             horizontalMarginDp = prefs[Keys.READER_MARGIN] ?: 20,
-            useSerifFont = prefs[Keys.READER_SERIF] ?: true
+            useSerifFont = prefs[Keys.READER_SERIF] ?: true,
+            audiobookRewindSeconds = (prefs[Keys.AUDIOBOOK_REWIND_SEC] ?: 10).coerceIn(1, 300),
+            audiobookForwardSeconds = (prefs[Keys.AUDIOBOOK_FORWARD_SEC] ?: 30).coerceIn(1, 300)
         )
     }
 
@@ -133,7 +140,9 @@ class PreferencesRepository(private val context: Context) {
                 lineSpacing = prefs[Keys.READER_LINE_SPACING] ?: 1.45f,
                 themeMode = currentTheme,
                 horizontalMarginDp = prefs[Keys.READER_MARGIN] ?: 20,
-                useSerifFont = prefs[Keys.READER_SERIF] ?: true
+                useSerifFont = prefs[Keys.READER_SERIF] ?: true,
+                audiobookRewindSeconds = (prefs[Keys.AUDIOBOOK_REWIND_SEC] ?: 10).coerceIn(1, 300),
+                audiobookForwardSeconds = (prefs[Keys.AUDIOBOOK_FORWARD_SEC] ?: 30).coerceIn(1, 300)
             )
             val updated = transform(current)
             prefs[Keys.READER_FONT_SIZE] = updated.fontSizeSp
@@ -141,6 +150,8 @@ class PreferencesRepository(private val context: Context) {
             prefs[Keys.READER_THEME] = updated.themeMode.name
             prefs[Keys.READER_MARGIN] = updated.horizontalMarginDp
             prefs[Keys.READER_SERIF] = updated.useSerifFont
+            prefs[Keys.AUDIOBOOK_REWIND_SEC] = updated.audiobookRewindSeconds.coerceIn(1, 300)
+            prefs[Keys.AUDIOBOOK_FORWARD_SEC] = updated.audiobookForwardSeconds.coerceIn(1, 300)
         }
     }
 

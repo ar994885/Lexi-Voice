@@ -31,6 +31,7 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
             audiobookDao = database.audiobookDao(),
             folderDao = database.folderDao(),
             preferencesRepository = preferencesRepository
+            libraryRepository = libraryRepository
         )
     }
     val pronunciationRepository: PronunciationRepository by lazy {
