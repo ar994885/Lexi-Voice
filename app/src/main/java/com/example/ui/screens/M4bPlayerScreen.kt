@@ -20,7 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -112,6 +112,7 @@ fun M4bPlayerScreen(
     var loadedWebPayload by remember { mutableStateOf<EpubParser.WebChapterPayload?>(null) }
     var isSeeking by remember { mutableStateOf(false) }
     var seekSliderPos by remember { mutableFloatStateOf(0f) }
+    var lastMatchedGlobalIndex by remember(playerState.audiobookId, playerState.activeSyncChapterIndex) { mutableStateOf(-1) }
 
     BackHandler { onBack() }
 
@@ -278,6 +279,7 @@ fun M4bPlayerScreen(
                         },
                         onValueChangeFinished = {
                             isSeeking = false
+                            lastMatchedGlobalIndex = -1
                             M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SEEK_TO) {
                                 putExtra(M4bPlaybackService.EXTRA_POSITION_MS, seekSliderPos.toLong())
                             }
@@ -325,6 +327,7 @@ fun M4bPlayerScreen(
                         }
                         androidx.compose.material3.TextButton(
                             onClick = {
+                                lastMatchedGlobalIndex = -1
                                 M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SKIP_BY) {
                                     putExtra(M4bPlaybackService.EXTRA_DELTA_MS, -(rewindSec * 1000L))
                                 }
@@ -385,11 +388,87 @@ fun M4bPlayerScreen(
                 val epubKey = playerState.sourceEpubKey
                 val payload = loadedWebPayload
                 if (epubKey != null && payload != null) {
-                    val activeHighlightIdx = if (payload.chapterIndex == playerState.activeSyncChapterIndex) {
-                        playerState.activeSyncSentenceIndex
-                    } else {
-                        -1
-                    }
+                    val activeHighlightIdx = remember(
+    payload.chapterIndex,
+    payload.sentences,
+    playerState.activeSyncChapterIndex,
+    playerState.activeSyncSentenceIndex,
+    playerState.activeSyncText,
+    playerState.currentPositionMs
+) {
+    if (payload.chapterIndex != playerState.activeSyncChapterIndex || payload.sentences.isEmpty()) {
+        -1
+    } else {
+        fun norm(s: String) = s.replace(Regex("\\s+"), " ").trim()
+        val spoken = norm(playerState.activeSyncText)
+
+        // 1. Fast path for newly exported chapters (exact 1:1 index alignment)
+        val directMatch = payload.sentences.getOrNull(playerState.activeSyncSentenceIndex)
+        if (directMatch != null && spoken.isNotEmpty() &&
+            norm(directMatch.text).contains(spoken, ignoreCase = true)
+        ) {
+            lastMatchedGlobalIndex = directMatch.globalIndex
+            directMatch.globalIndex
+        } else {
+            // 2. Build context phrase (prev + current + next segment) for legacy split-italics sync maps
+            val chapterSegs = M4bPlayerStateHolder.syncSegments.filter {
+                it.chapterIndex == payload.chapterIndex
+            }
+            val segIdx = chapterSegs.indexOfFirst {
+                playerState.currentPositionMs in it.startMs..it.endMs
+            }.takeIf { it >= 0 } ?: chapterSegs.indexOfFirst {
+                it.sentenceIndex == playerState.activeSyncSentenceIndex
+            }
+
+            val contextPhrase = if (segIdx >= 0) {
+                listOfNotNull(
+                    chapterSegs.getOrNull(segIdx - 1)?.text,
+                    chapterSegs.getOrNull(segIdx)?.text,
+                    chapterSegs.getOrNull(segIdx + 1)?.text
+                ).joinToString(" ") { norm(it) }.trim()
+            } else {
+                spoken
+            }
+
+            // 3. Restrict search to a monotonic forward window around lastMatchedGlobalIndex
+            val startPos = if (lastMatchedGlobalIndex >= 0) {
+                payload.sentences.indexOfFirst { it.globalIndex >= lastMatchedGlobalIndex }.coerceAtLeast(0)
+            } else {
+                0
+            }
+            val forwardWindow = payload.sentences.drop(startPos).take(12)
+
+            val matched =
+                // Try matching the stitched 3-segment context inside the forward window
+                forwardWindow.firstOrNull { s ->
+                    val sNorm = norm(s.text)
+                    contextPhrase.length >= 6 && (sNorm.contains(contextPhrase, ignoreCase = true) ||
+                        contextPhrase.contains(sNorm, ignoreCase = true))
+                }
+                // Fallback: match single spoken phrase inside the forward window only (never backward!)
+                ?: forwardWindow.firstOrNull { s ->
+                    val sNorm = norm(s.text)
+                    spoken.isNotEmpty() && (sNorm.contains(spoken, ignoreCase = true) ||
+                        spoken.contains(sNorm, ignoreCase = true))
+                }
+                // Fallback: if user scrubbed backward manually, search full chapter using the stitched context
+                ?: payload.sentences.firstOrNull { s ->
+                    val sNorm = norm(s.text)
+                    contextPhrase.length >= 6 && (sNorm.contains(contextPhrase, ignoreCase = true) ||
+                        contextPhrase.contains(sNorm, ignoreCase = true))
+                }
+                ?: directMatch
+
+            val resolved = matched?.globalIndex ?: playerState.activeSyncSentenceIndex
+            if (matched != null) {
+                lastMatchedGlobalIndex = resolved
+            }
+            resolved
+        }
+    }
+}
+
+
                     EpubWebView(
                         fileKey = epubKey,
                         isDirectPath = playerState.sourceEpubIsDirect,
@@ -398,18 +477,57 @@ fun M4bPlayerScreen(
                         activeSentenceIndex = activeHighlightIdx,
                         hasPrevChapter = false,
                         hasNextChapter = false,
+                        enableSentenceTap = true,
                         onSentenceTapped = { tappedSentenceIdx ->
+                        lastMatchedGlobalIndex = tappedSentenceIdx
                             val match = M4bPlayerStateHolder.syncSegments.firstOrNull {
                                 it.chapterIndex == payload.chapterIndex && it.sentenceIndex == tappedSentenceIdx
+                            } ?: payload.sentences.getOrNull(tappedSentenceIdx)?.text?.trim()?.let { txt ->
+                                M4bPlayerStateHolder.syncSegments.firstOrNull {
+                                    it.chapterIndex == payload.chapterIndex &&
+                                        (it.text.trim() == txt || it.text.contains(txt) || txt.contains(it.text))
+                                }
                             }
                             if (match != null) {
                                 M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SEEK_TO) {
                                     putExtra(M4bPlaybackService.EXTRA_POSITION_MS, match.startMs)
+                                    putExtra(M4bPlaybackService.EXTRA_AUTO_PLAY, true)
+                                }
+                            } else {
+                                val chapterSegs = M4bPlayerStateHolder.syncSegments.filter {
+                                    it.chapterIndex == payload.chapterIndex
+                                }
+                                val targetChapterMeta = when {
+                                    chapterSegs.isNotEmpty() -> {
+                                        val segMid = chapterSegs.first().startMs
+                                        playerState.chapters.firstOrNull { segMid in it.startMs..it.endMs }
+                                    }
+                                    else -> null
+                                } ?: playerState.chapters.firstOrNull {
+                                    payload.chapterTitle.isNotBlank() &&
+                                        it.title.equals(payload.chapterTitle, ignoreCase = true)
+                                } ?: if (playerState.activeSyncChapterIndex == payload.chapterIndex) {
+                                    playerState.chapters.getOrNull(playerState.currentChapterIndex)
+                                } else {
+                                    playerState.chapters.getOrNull(payload.chapterIndex)
+                                }
+                                val rangeStart = chapterSegs.firstOrNull()?.startMs ?: targetChapterMeta?.startMs
+                                val rangeEnd = chapterSegs.lastOrNull()?.endMs ?: targetChapterMeta?.endMs
+                                if (rangeStart != null && rangeEnd != null) {
+                                    val totalSentences = payload.sentences.size.coerceAtLeast(1)
+                                    val fraction = tappedSentenceIdx.toFloat() / totalSentences.toFloat()
+                                    val chDur = (rangeEnd - rangeStart).coerceAtLeast(0L)
+                                    val estimatedPos = rangeStart + (chDur * fraction).toLong()
+                                    M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_SEEK_TO) {
+                                        putExtra(M4bPlaybackService.EXTRA_POSITION_MS, estimatedPos)
+                                        putExtra(M4bPlaybackService.EXTRA_AUTO_PLAY, true)
+                                    }
                                 }
                             }
                         },
                         onPullPrevChapter = {},
                         onPullNextChapter = {},
+                        forceScrollMode = true,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -504,14 +622,14 @@ fun M4bPlayerScreen(
                     modifier = Modifier.padding(bottom = 10.dp)
                 )
                 LazyColumn(modifier = Modifier.height(400.dp)) {
-                    items(playerState.chapters, key = { "${it.index}_${it.startMs}" }) { ch ->
-                        val isCurrent = ch.index == playerState.currentChapterIndex
+                    itemsIndexed(playerState.chapters, key = { idx, ch -> "${idx}_${ch.startMs}" }) { idx, ch ->
+                        val isCurrent = idx == playerState.currentChapterIndex
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
                                     M4bPlaybackService.sendAction(context, M4bPlaybackService.ACTION_JUMP_CHAPTER) {
-                                        putExtra(M4bPlaybackService.EXTRA_CHAPTER_INDEX, ch.index)
+                                        putExtra(M4bPlaybackService.EXTRA_CHAPTER_INDEX, idx)
                                     }
                                     showChaptersSheet = false
                                 }
@@ -519,7 +637,7 @@ fun M4bPlayerScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "${ch.index + 1}.",
+                                text = "${idx + 1}.",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.width(34.dp)

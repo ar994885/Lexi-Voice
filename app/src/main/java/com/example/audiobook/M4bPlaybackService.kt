@@ -218,7 +218,14 @@ class M4bPlaybackService : Service() {
             }
             ACTION_SEEK_TO -> {
                 val pos = intent.getLongExtra(EXTRA_POSITION_MS, 0L)
-                seekToGlobal(pos)
+                val autoPlay = intent.getBooleanExtra(EXTRA_AUTO_PLAY, true)
+                serviceScope.launch {
+                    syncLatestFromDatabase(autoPlayOnNewAfterEnd = false)
+                    seekToGlobal(pos)
+                    if (autoPlay || exoPlayer?.isPlaying == true) {
+                        resumePlayback()
+                    }
+                }
             }
             ACTION_SKIP_BY -> {
                 val delta = intent.getLongExtra(EXTRA_DELTA_MS, 0L)
@@ -341,14 +348,19 @@ class M4bPlaybackService : Service() {
             } else {
                 emptyList()
             }
-            val segs = entity.syncJsonPath?.let { path ->
-                SyncAlignmentSerializer.loadSegments(File(path))
-            }.orEmpty()
+            val segs = (entity.syncJsonPath?.takeIf { it.isNotBlank() }?.let { path ->
+                SyncAlignmentSerializer.loadSegments(File(path)).takeIf { it.isNotEmpty() }
+            } ?: run {
+                val folder = entity.folderUri ?: entity.fileUri.removePrefix("folder://")
+                val candidate1 = File(folder, "sync_map.json")
+                if (candidate1.exists()) SyncAlignmentSerializer.loadSegments(candidate1)
+                else null
+            }).orEmpty()
             Triple(chs, files, segs)
         }
 
         val usePlaylist = entity.isFolderAudiobook && chapterFiles.isNotEmpty()
-        val resolvedChapters = if (usePlaylist) {
+        val rawChapters = if (usePlaylist) {
             if (chapters.size == chapterFiles.size) chapters
             else chapterFiles.mapIndexed { idx, cf ->
                 AudiobookChapterMeta(idx, cf.title, cf.startMs, cf.endMs)
@@ -356,6 +368,7 @@ class M4bPlaybackService : Service() {
         } else {
             chapters
         }
+        val resolvedChapters = SyncAlignmentSerializer.normalizeChapterOrdinals(rawChapters)
         val totalDur = if (usePlaylist) {
             resolvedChapters.lastOrNull()?.endMs ?: entity.durationMs
         } else {
@@ -582,7 +595,9 @@ class M4bPlaybackService : Service() {
                 }
                 if (wasPausedByUser) {
                     val currentGlobal = computeGlobalPositionMs(player)
-                    if (currentGlobal > 1_000L) {
+                    val chIdx = findChapterIndex(playlistChapters, currentGlobal)
+                    val chStart = playlistChapters.getOrNull(chIdx)?.startMs ?: 0L
+                    if (currentGlobal - chStart > 1_200L) {
                         seekToGlobal(currentGlobal - 1_000L)
                     }
                 }
@@ -609,6 +624,7 @@ class M4bPlaybackService : Service() {
     }
 
     private fun seekToGlobal(posMs: Long) {
+        wasPausedByUser = false
         val player = exoPlayer ?: return
         val dur = if (isPlaylistMode) {
             M4bPlayerStateHolder.state.value.durationMs
@@ -617,8 +633,9 @@ class M4bPlaybackService : Service() {
         }
         val clamped = posMs.coerceIn(0L, dur.coerceAtLeast(posMs))
         if (isPlaylistMode && playlistChapters.isNotEmpty()) {
-            val targetIdx = findChapterIndex(playlistChapters, clamped).coerceIn(0, playlistChapters.lastIndex)
-            val chStart = playlistChapters[targetIdx].startMs
+            val maxItemIdx = (player.mediaItemCount - 1).coerceAtLeast(0)
+            val targetIdx = findChapterIndex(playlistChapters, clamped).coerceIn(0, maxItemIdx)
+            val chStart = playlistChapters.getOrNull(targetIdx)?.startMs ?: 0L
             val offsetInItem = (clamped - chStart).coerceAtLeast(0L)
             player.seekTo(targetIdx, offsetInItem)
         } else {
@@ -674,6 +691,7 @@ class M4bPlaybackService : Service() {
     }
 
     private fun jumpToChapterInternal(chapterIndex: Int, startPlayback: Boolean) {
+        wasPausedByUser = false
         val chapters = M4bPlayerStateHolder.state.value.chapters
         if (chapters.isEmpty()) return
         val clampedIdx = chapterIndex.coerceIn(0, chapters.lastIndex)

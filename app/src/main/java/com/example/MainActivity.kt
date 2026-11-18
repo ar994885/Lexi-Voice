@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -163,6 +164,7 @@ private val DRAWER_ITEMS = listOf(
 
 class MainActivity : ComponentActivity() {
     private val deepLinkFlow = MutableStateFlow<OverlayDeepLinkRequest?>(null)
+    private var volumeKeyHandler: ((Int) -> Boolean)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -174,10 +176,29 @@ class MainActivity : ComponentActivity() {
             LexiVoiceTheme {
                 LexiVoiceAppRoot(
                     deepLinkFlow = deepLinkFlow,
-                    onConsumeDeepLink = { deepLinkFlow.value = null }
+                    onConsumeDeepLink = { deepLinkFlow.value = null },
+                    onRegisterVolumeKeyHandler = { handler -> volumeKeyHandler = handler }
                 )
             }
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            if (volumeKeyHandler?.invoke(keyCode) == true) {
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) &&
+            volumeKeyHandler != null
+        ) {
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -203,7 +224,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun LexiVoiceAppRoot(
     deepLinkFlow: MutableStateFlow<OverlayDeepLinkRequest?>,
-    onConsumeDeepLink: () -> Unit
+    onConsumeDeepLink: () -> Unit,
+    onRegisterVolumeKeyHandler: (((Int) -> Boolean)?) -> Unit
 ) {
     val context = LocalContext.current
     val navController = rememberNavController()
@@ -436,7 +458,8 @@ private fun LexiVoiceAppRoot(
                             navController.navigate(Routes.m4bPlayerRoute(aid)) {
                                 launchSingleTop = true
                             }
-                        }
+                        },
+                        onRegisterVolumeKeyHandler = onRegisterVolumeKeyHandler
                     )
                 }
 

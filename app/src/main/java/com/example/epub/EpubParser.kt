@@ -60,6 +60,13 @@ object EpubParser {
         val mimeType: String
     )
 
+    data class InBookSearchResult(
+        val chapterIndex: Int,
+        val chapterTitle: String,
+        val sentenceIndex: Int,
+        val snippet: String
+    )
+
     fun extractMetadataForIndexing(
         context: Context,
         fileKey: String,
@@ -226,7 +233,7 @@ object EpubParser {
         var paraIdx = 0
 
         val body = doc.body()
-        val skipTags = setOf("script", "style", "svg", "title", "noscript")
+        val skipTags = setOf("script", "style", "svg", "title", "noscript", "rt", "rp")
         val textNodes = mutableListOf<TextNode>()
 
         fun collectTextNodes(node: Node) {
@@ -370,6 +377,79 @@ object EpubParser {
                 DataNode(
                     """
                     (function(){
+                      window.__lexiPagedMode = false;
+                      window.__lexiCurrentPage = 0;
+                      window.__lexiTotalPages = 1;
+                      window.__lexiLastSelectedSentIdx = -1;
+
+                      function getPageWidth() {
+                        return Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+                      }
+
+                      function notifyPageState() {
+                        try {
+                          if (window.LexiBridge && window.LexiBridge.onPageStateChanged) {
+                            window.LexiBridge.onPageStateChanged(window.__lexiCurrentPage, window.__lexiTotalPages);
+                          }
+                        } catch (e) {}
+                      }
+
+                      window.lexiGoToPage = function(pageIdx, smooth) {
+                        var pageW = getPageWidth();
+                        var total = Math.max(1, window.__lexiTotalPages || 1);
+                        var clamped = Math.max(0, Math.min(total - 1, pageIdx));
+                        window.__lexiCurrentPage = clamped;
+                        var targetX = clamped * pageW;
+                        try {
+                          window.scrollTo({ left: targetX, top: 0, behavior: smooth ? 'smooth' : 'auto' });
+                        } catch (e) {
+                          window.scrollTo(targetX, 0);
+                        }
+                        notifyPageState();
+                      };
+
+                      window.lexiRecalcPagination = function(jumpToPage) {
+                        if (!window.__lexiPagedMode) {
+                          window.__lexiCurrentPage = 0;
+                          window.__lexiTotalPages = 1;
+                          notifyPageState();
+                          return;
+                        }
+                        requestAnimationFrame(function() {
+                          requestAnimationFrame(function() {
+                            var pageW = getPageWidth();
+                            var scrollW = document.documentElement.scrollWidth || pageW;
+                            var total = Math.max(1, Math.ceil(Math.max(0, scrollW - 4) / pageW));
+                            window.__lexiTotalPages = total;
+                            var target = 0;
+                            if (jumpToPage === -1) {
+                              target = total - 1;
+                            } else if (typeof jumpToPage === 'number' && jumpToPage >= 0) {
+                              target = Math.min(total - 1, jumpToPage);
+                            } else {
+                              target = Math.max(0, Math.min(total - 1, window.__lexiCurrentPage || 0));
+                            }
+                            window.lexiGoToPage(target, false);
+                          });
+                        });
+                      };
+
+                      window.lexiFlipPage = function(delta) {
+                        if (!window.__lexiPagedMode) return;
+                        var next = (window.__lexiCurrentPage || 0) + delta;
+                        if (next < 0) {
+                          if (window.LexiBridge && window.LexiBridge.onPageBoundaryReached) {
+                            window.LexiBridge.onPageBoundaryReached(-1);
+                          }
+                        } else if (next >= (window.__lexiTotalPages || 1)) {
+                          if (window.LexiBridge && window.LexiBridge.onPageBoundaryReached) {
+                            window.LexiBridge.onPageBoundaryReached(1);
+                          }
+                        } else {
+                          window.lexiGoToPage(next, false);
+                        }
+                      };
+
                       window.lexiHighlightSentence = function(idx, shouldScroll) {
                         var prev = document.querySelectorAll('.lexi-s.lexi-active');
                         for (var i = 0; i < prev.length; i++) {
@@ -381,37 +461,153 @@ object EpubParser {
                           targets[j].classList.add('lexi-active');
                         }
                         if (shouldScroll && targets.length > 0) {
-                          targets[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          if (window.__lexiPagedMode) {
+                            var pageW = getPageWidth();
+                            var curScroll = window.scrollX || document.documentElement.scrollLeft || 0;
+                            var absX = targets[0].getBoundingClientRect().left + curScroll;
+                            var targetPage = Math.max(0, Math.floor(absX / pageW));
+                            if (targetPage !== window.__lexiCurrentPage) {
+                              window.lexiGoToPage(targetPage, false);
+                            }
+                          } else {
+                            targets[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          }
                         }
                       };
+
+                      window.lexiApplyUserHighlights = function(items) {
+                        var existing = document.querySelectorAll('.lexi-s.lexi-user-hl');
+                        for (var i = 0; i < existing.length; i++) {
+                          existing[i].classList.remove('lexi-user-hl');
+                          existing[i].style.backgroundColor = '';
+                        }
+                        if (!Array.isArray(items)) return;
+                        for (var k = 0; k < items.length; k++) {
+                          var item = items[k];
+                          var spans = document.querySelectorAll('.lexi-s[data-idx="' + item.sentenceIndex + '"]');
+                          for (var s = 0; s < spans.length; s++) {
+                            spans[s].classList.add('lexi-user-hl');
+                            spans[s].style.backgroundColor = item.colorHex + '66';
+                          }
+                        }
+                      };
+
+                      window.lexiGetVisibleSentenceIndex = function() {
+                        var spans = document.querySelectorAll('.lexi-s');
+                        var vw = getPageWidth();
+                        var vh = window.innerHeight || document.documentElement.clientHeight || 1;
+                        for (var i = 0; i < spans.length; i++) {
+                          var rect = spans[i].getBoundingClientRect();
+                          if (rect.width > 0 && rect.height > 0 && rect.left >= -10 && rect.left < vw && rect.top >= 0 && rect.top < vh) {
+                            var idx = parseInt(spans[i].getAttribute('data-idx'), 10);
+                            if (!isNaN(idx)) return idx;
+                          }
+                        }
+                        return 0;
+                      };
+
                       document.addEventListener('click', function(ev) {
                         try {
                           var selText = window.getSelection ? window.getSelection().toString().trim() : '';
                           if (selText.length > 0) return;
-                          var el = ev.target && ev.target.closest ? ev.target.closest('.lexi-s') : null;
-                          if (el && window.LexiBridge && window.LexiBridge.onSentenceTapped) {
-                            var idx = parseInt(el.getAttribute('data-idx'), 10);
-                            if (!isNaN(idx)) window.LexiBridge.onSentenceTapped(idx);
+                          var link = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
+                          if (link) {
+                            var href = link.getAttribute('href') || '';
+                            if (href.indexOf('http://') === 0 || href.indexOf('https://') === 0) {
+                              if (href.indexOf('${ASSET_BASE_URL}') !== 0) {
+                                ev.preventDefault();
+                                if (window.LexiBridge && window.LexiBridge.onExternalLinkClicked) {
+                                  window.LexiBridge.onExternalLinkClicked(href);
+                                }
+                                return;
+                              }
+                            }
+                            if (href.indexOf('#') === 0 && href.length > 1) {
+                              var anchor = document.getElementById(href.substring(1));
+                              if (anchor) {
+                                ev.preventDefault();
+                                if (window.__lexiPagedMode) {
+                                  var pW = getPageWidth();
+                                  var cS = window.scrollX || document.documentElement.scrollLeft || 0;
+                                  var aX = anchor.getBoundingClientRect().left + cS;
+                                  window.lexiGoToPage(Math.max(0, Math.floor(aX / pW)), false);
+                                } else {
+                                  anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                }
+                                return;
+                              }
+                            }
+                          }
+                          var vw = getPageWidth();
+                          var x = ev.clientX || 0;
+                          if (window.__lexiPagedMode) {
+                            if (x < vw * 0.25) {
+                              window.lexiFlipPage(-1);
+                              return;
+                            }
+                            if (x > vw * 0.75) {
+                              window.lexiFlipPage(1);
+                              return;
+                            }
+                          }
+                          var span = ev.target && ev.target.closest ? ev.target.closest('.lexi-s') : null;
+                          var sentIdx = -1;
+                          if (span) {
+                            var parsed = parseInt(span.getAttribute('data-idx'), 10);
+                            if (!isNaN(parsed) && parsed >= 0) {
+                              sentIdx = parsed;
+                            }
+                          }
+                          if (sentIdx >= 0 && window.LexiBridge && window.LexiBridge.onSentenceTapped) {
+                            window.LexiBridge.onSentenceTapped(sentIdx);
+                          } else if (window.LexiBridge && window.LexiBridge.onCenterTapped) {
+                            window.LexiBridge.onCenterTapped();
                           }
                         } catch (e) {}
-                      });
-                      var lexiSelTimer = null;
-                      document.addEventListener('selectionchange', function() {
-                        if (lexiSelTimer) clearTimeout(lexiSelTimer);
-                        lexiSelTimer = setTimeout(function() {
-                          try {
-                            var sel = window.getSelection ? window.getSelection().toString().trim() : '';
-                            if (window.LexiBridge && window.LexiBridge.onTextSelected) {
-                              window.LexiBridge.onTextSelected(sel);
-                            }
-                          } catch (e) {}
-                        }, 180);
-                      });
-                    })();
-                    """.trimIndent()
-                )
-            )
-        )
+                        });
+var lexiSelTimer = null;
+document.addEventListener('selectionchange', function() {
+if (lexiSelTimer) clearTimeout(lexiSelTimer);
+lexiSelTimer = setTimeout(function() {
+try {
+var selection = window.getSelection ? window.getSelection() : null;
+var sel = selection ? selection.toString().trim() : '';
+var sentIdx = -1;
+if (sel.length > 0 && selection && selection.rangeCount > 0) {
+  var range = selection.getRangeAt(0);
+  var tryFindSpan = function(n) {
+    if (!n) return null;
+    var el = n.nodeType === 1 ? n : n.parentElement;
+    if (el && el.closest) {
+      var direct = el.closest('.lexi-s');
+      if (direct) return direct;
+      if (el.querySelector) {
+        return el.querySelector('.lexi-s');
+      }
+    }
+    return null;
+  };
+  var span = tryFindSpan(selection.anchorNode) || tryFindSpan(selection.focusNode) || tryFindSpan(range.commonAncestorContainer);
+  if (span) {
+    var parsed = parseInt(span.getAttribute('data-idx'), 10);
+    if (!isNaN(parsed)) sentIdx = parsed;
+  }
+}
+window.__lexiLastSelectedSentIdx = sentIdx;
+if (window.LexiBridge && window.LexiBridge.onTextSelectedWithSentence) {
+window.LexiBridge.onTextSelectedWithSentence(sel, sentIdx);
+} else if (window.LexiBridge && window.LexiBridge.onTextSelected) {
+window.LexiBridge.onTextSelected(sel);
+}
+} catch (e) {}
+}, 180);
+});
+})();
+""".trimIndent()
+)
+)
+)
+
 
         return WebChapterPayload(
             chapterIndex = chapterIndex,
@@ -481,6 +677,49 @@ object EpubParser {
             sentences = webPayload.sentences,
             plainText = webPayload.plainText
         )
+    }
+
+    fun searchBookChapters(
+        context: Context,
+        fileKey: String,
+        isDirectPath: Boolean,
+        chapters: List<EpubChapterSummary>,
+        query: String,
+        maxResults: Int = 150
+    ): List<InBookSearchResult> {
+        val needle = query.trim()
+        if (needle.length < 2 || chapters.isEmpty()) return emptyList()
+        val localZipFile = resolveReadableZipFile(context, fileKey, isDirectPath) ?: return emptyList()
+        val shouldDelete = !isDirectPath
+        val results = mutableListOf<InBookSearchResult>()
+        return try {
+            ZipFile(localZipFile).use { zip ->
+                for (chapter in chapters) {
+                    if (results.size >= maxResults) break
+                    val entry = getZipEntryIgnoreCase(zip, chapter.href) ?: continue
+                    val rawHtml = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
+                    val payload = buildWebChapterPayload(chapter.index, chapter.title, chapter.href, rawHtml)
+                    for (sentence in payload.sentences) {
+                        if (sentence.text.contains(needle, ignoreCase = true)) {
+                            results.add(
+                                InBookSearchResult(
+                                    chapterIndex = chapter.index,
+                                    chapterTitle = chapter.title,
+                                    sentenceIndex = sentence.globalIndex,
+                                    snippet = sentence.text
+                                )
+                            )
+                            if (results.size >= maxResults) break
+                        }
+                    }
+                }
+                results
+            }
+        } catch (_: Exception) {
+            results
+        } finally {
+            if (shouldDelete) localZipFile.delete()
+        }
     }
 
     fun loadAllChapterSentencesForExport(

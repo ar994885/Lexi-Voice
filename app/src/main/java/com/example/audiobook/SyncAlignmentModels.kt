@@ -41,7 +41,7 @@ data class SyncMapChapterEntry(
     val chapterIndex: Int,
     val title: String,
     val fileName: String,
-    val fileUri: String,
+    val fileUri: String = "",
     val durationMs: Long,
     val isDirectPath: Boolean = false,
     val sentences: List<SyncMapSentenceEntry> = emptyList()
@@ -97,6 +97,12 @@ object SyncAlignmentSerializer {
                 )
             }
         }.getOrDefault(emptyList())
+    }
+
+    fun normalizeChapterOrdinals(chapters: List<AudiobookChapterMeta>): List<AudiobookChapterMeta> {
+        return chapters.mapIndexed { ordinalIdx, ch ->
+            if (ch.index == ordinalIdx) ch else ch.copy(index = ordinalIdx)
+        }
     }
 
     fun encodeChapterFiles(chapters: List<Mp3ChapterFileMeta>): String {
@@ -363,16 +369,25 @@ object SyncAlignmentSerializer {
     fun loadSegments(file: File): List<SyncAlignmentSegment> {
         if (!file.exists()) return emptyList()
         return runCatching {
-            val arr = JSONArray(file.readText())
-            (0 until arr.length()).mapNotNull { i ->
-                val obj = arr.optJSONObject(i) ?: return@mapNotNull null
-                SyncAlignmentSegment(
-                    chapterIndex = obj.optInt("chapterIndex", 0),
-                    sentenceIndex = obj.optInt("sentenceIndex", 0),
-                    text = obj.optString("text", ""),
-                    startMs = obj.optLong("startMs", 0L),
-                    endMs = obj.optLong("endMs", 0L)
-                )
+            val text = file.readText().trim()
+            if (text.startsWith("[")) {
+                val arr = JSONArray(text)
+                (0 until arr.length()).mapNotNull { i ->
+                    val obj = arr.optJSONObject(i) ?: return@mapNotNull null
+                    SyncAlignmentSegment(
+                        chapterIndex = obj.optInt("chapterIndex", 0),
+                        sentenceIndex = obj.optInt("sentenceIndex", 0),
+                        text = obj.optString("text", ""),
+                        startMs = obj.optLong("startMs", 0L),
+                        endMs = obj.optLong("endMs", 0L)
+                    )
+                }
+            } else if (text.startsWith("{")) {
+                decodeBookSyncMap(text)?.let { bsm ->
+                    flattenToTimeline(bsm).segments
+                }.orEmpty()
+            } else {
+                emptyList()
             }
         }.getOrDefault(emptyList())
     }

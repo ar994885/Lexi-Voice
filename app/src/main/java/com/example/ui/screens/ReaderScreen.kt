@@ -1,6 +1,15 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.net.Uri
+import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -11,7 +20,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,17 +30,22 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.AudioFile
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -40,22 +53,19 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -65,13 +75,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.LexiVoiceApplication
+import com.example.data.prefs.ReaderMode
 import com.example.export.ExportChaptersActivity
 import com.example.export.ExportStateHolder
 import com.example.overlay.FloatingOverlayController
@@ -79,14 +93,26 @@ import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsSourceType
 import com.example.tts.TtsStateHolder
 import com.example.ui.ReaderViewModel
+import com.example.ui.components.BookmarksAndHighlightsSheet
+import com.example.ui.components.CustomCssEditorDialog
+import com.example.ui.components.CustomThemeCreatorDialog
 import com.example.ui.components.EpubWebView
+import com.example.ui.components.InBookSearchSheet
+import com.example.ui.components.ReaderAppearanceBottomBar
+import com.example.ui.components.ReaderAudioPlayerDockedBar
+import com.example.ui.components.ReaderTypographySheet
+import com.example.ui.components.TextSelectionActionBar
 import com.example.ui.components.TtsControlsModalSheet
-import com.example.ui.components.TtsDockedBar
 import com.example.ui.theme.ReaderThemeMode
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
-import java.util.Locale
 import kotlin.math.roundToInt
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -96,13 +122,17 @@ fun ReaderScreen(
     onBack: () -> Unit,
     onOpenPronunciationRules: (Long) -> Unit = {},
     onOpenAudiobook: (Long) -> Unit = {},
+    onRegisterVolumeKeyHandler: (((Int) -> Boolean)?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val view = LocalView.current
     val app = context.applicationContext as LexiVoiceApplication
     val scope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val readerSettings by viewModel.readerSettings.collectAsStateWithLifecycle()
+    val importedCustomFonts by viewModel.importedCustomFonts.collectAsStateWithLifecycle()
+    val allBookmarksAndHighlights by viewModel.bookmarksAndHighlights.collectAsStateWithLifecycle(initialValue = emptyList())
     val ttsState by TtsStateHolder.state.collectAsStateWithLifecycle()
     val overlayState by FloatingOverlayController.state.collectAsStateWithLifecycle()
     val exportProgress by ExportStateHolder.state.collectAsStateWithLifecycle()
@@ -117,16 +147,99 @@ fun ReaderScreen(
     }.collectAsStateWithLifecycle(initialValue = emptyList())
     val primaryAudiobook = linkedAudiobooks.firstOrNull()
 
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val isSearching by viewModel.isSearching.collectAsStateWithLifecycle()
+
     var showTocSheet by remember { mutableStateOf(false) }
+    var showSearchSheet by remember { mutableStateOf(false) }
+    var showBookmarksSheet by remember { mutableStateOf(false) }
     var showAppearanceSheet by remember { mutableStateOf(false) }
+    var showCustomCssDialog by remember { mutableStateOf(false) }
+    var showCustomThemeDialog by remember { mutableStateOf(false) }
+    val fontPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.importCustomFont(context, it) }
+    }
     var showTtsSheet by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
+    var showAudioPlayerBar by remember { mutableStateOf(false) }
+    var showReaderChrome by remember { mutableStateOf(true) }
+    var currentPage by remember(uiState.currentChapterIndex) { mutableIntStateOf(0) }
+    var totalPages by remember(uiState.currentChapterIndex) { mutableIntStateOf(1) }
+    var targetPageTrigger by remember { mutableStateOf<Pair<Int, Long>?>(null) }
+    var pageFlipTrigger by remember { mutableStateOf<Pair<Int, Long>?>(null) }
     var selectedWordForRule by remember(bookId, uiState.currentChapterIndex) { mutableStateOf("") }
+    var selectedSentenceForAction by remember(bookId, uiState.currentChapterIndex) { mutableIntStateOf(-1) }
     var showQuickRuleDialog by remember { mutableStateOf(false) }
     var latestScrollY by remember { mutableIntStateOf(0) }
     var showAudiobookAvailablePrompt by remember(bookId) { mutableStateOf(false) }
     var promptedAudiobookForSession by remember(bookId) { mutableStateOf(false) }
     var pendingTtsActionDuringExport by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingExternalUrl by remember { mutableStateOf<String?>(null) }
+    var showFinishBookDialog by remember { mutableStateOf(false) }
+
+    val chapterHighlights = remember(allBookmarksAndHighlights, uiState.currentChapterIndex) {
+        allBookmarksAndHighlights.filter {
+            it.chapterIndex == uiState.currentChapterIndex && it.type == "HIGHLIGHT"
+        }
+    }
+    val chapterHasBookmark = remember(allBookmarksAndHighlights, uiState.currentChapterIndex) {
+        allBookmarksAndHighlights.any {
+            it.chapterIndex == uiState.currentChapterIndex && it.type == "BOOKMARK"
+        }
+    }
+
+    // Apply per-reader brightness preference and restore system brightness when leaving ReaderScreen
+    val brightnessPref = readerSettings.brightnessLevel
+    DisposableEffect(view, brightnessPref) {
+        val window = view.context.findActivity()?.window
+        if (window != null) {
+            val lp = window.attributes
+            lp.screenBrightness = if (brightnessPref < 0f) {
+                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+            } else {
+                brightnessPref.coerceIn(0.05f, 1.0f)
+            }
+            window.attributes = lp
+        }
+        onDispose { }
+    }
+    DisposableEffect(view) {
+        onDispose {
+            val window = view.context.findActivity()?.window
+            if (window != null) {
+                val lp = window.attributes
+                lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                window.attributes = lp
+            }
+        }
+    }
+
+    // Volume Key Page Turning
+    DisposableEffect(readerSettings.volumeKeysTurnPages) {
+        if (readerSettings.volumeKeysTurnPages) {
+            onRegisterVolumeKeyHandler { keyCode ->
+                when (keyCode) {
+                    KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                        pageFlipTrigger = 1 to System.nanoTime()
+                        true
+                    }
+                    KeyEvent.KEYCODE_VOLUME_UP -> {
+                        pageFlipTrigger = -1 to System.nanoTime()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        } else {
+            onRegisterVolumeKeyHandler(null)
+        }
+        onDispose {
+            onRegisterVolumeKeyHandler(null)
+        }
+    }
 
     BackHandler {
         viewModel.saveScrollProgress(latestScrollY)
@@ -148,177 +261,61 @@ fun ReaderScreen(
         ttsState.sourceType == TtsSourceType.BOOK &&
         ttsState.bookId == bookId
 
-    // Auto-switch chapter when TTS advances into the next/previous chapter
     LaunchedEffect(ttsState.chapterIndex, isTtsPlayingThisBook) {
         if (isTtsPlayingThisBook && ttsState.chapterIndex != uiState.currentChapterIndex) {
             viewModel.syncChapterFromTts(ttsState.chapterIndex)
         }
     }
 
-    val theme = readerSettings.themeMode
-
-    Scaffold(
-        modifier = modifier,
-        containerColor = theme.background,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            TopAppBar(
-                modifier = Modifier.statusBarsPadding(),
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = theme.chromeBg,
-                    titleContentColor = theme.text,
-                    navigationIconContentColor = theme.text,
-                    actionIconContentColor = theme.text
-                ),
-                navigationIcon = {
-                    IconButton(
-                        onClick = {
-                            viewModel.saveScrollProgress(latestScrollY)
-                            onBack()
-                        },
-                        modifier = Modifier.testTag("reader_back_button")
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Library")
-                    }
-                },
-                title = {
-                    Column {
-                        Text(
-                            text = uiState.book?.title ?: "Reader",
-                            style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        val chNum = if (uiState.chapters.isNotEmpty()) {
-                            "Ch ${uiState.currentChapterIndex + 1}/${uiState.chapters.size} • ${uiState.webChapterPayload?.chapterTitle.orEmpty()}"
-                        } else {
-                            uiState.webChapterPayload?.chapterTitle.orEmpty()
-                        }
-                        Text(
-                            text = chNum,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = theme.secondaryText,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(
-                        onClick = {
-                            FloatingOverlayController.setVisible(context, !overlayState.isVisible)
-                        },
-                        modifier = Modifier.testTag("reader_floating_popup_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PictureInPictureAlt,
-                            contentDescription = "Toggle Floating Playback Popup",
-                            tint = if (overlayState.isVisible) MaterialTheme.colorScheme.primary else theme.text
-                        )
-                    }
-                    IconButton(
-                        onClick = { showTocSheet = true },
-                        modifier = Modifier.testTag("reader_toc_button")
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Table of Contents")
-                    }
-                    IconButton(
-                        onClick = { showAppearanceSheet = true },
-                        modifier = Modifier.testTag("reader_appearance_button")
-                    ) {
-                        Icon(Icons.Default.FormatSize, contentDescription = "Reader Appearance")
-                    }
-                    Box {
-                        IconButton(
-                            onClick = { showMoreMenu = true },
-                            modifier = Modifier.testTag("reader_more_menu_button")
-                        ) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More Reader Options")
-                        }
-                        DropdownMenu(
-                            expanded = showMoreMenu,
-                            onDismissRequest = { showMoreMenu = false }
-                        ) {
-                            if (primaryAudiobook != null) {
-                                DropdownMenuItem(
-                                    text = { Text("Open Synced Audiobook") },
-                                    leadingIcon = {
-                                        Icon(Icons.Default.Headphones, contentDescription = null)
-                                    },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        viewModel.syncCurrentProgressToAudiobook(primaryAudiobook) { aid ->
-                                            onOpenAudiobook(aid)
-                                        }
-                                    },
-                                    modifier = Modifier.testTag("reader_menu_open_audiobook")
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Pronunciation Rules") },
-                                leadingIcon = {
-                                    Icon(Icons.Default.RecordVoiceOver, contentDescription = null)
-                                },
-                                onClick = {
-                                    showMoreMenu = false
-                                    onOpenPronunciationRules(bookId)
-                                },
-                                modifier = Modifier.testTag("reader_menu_pronunciation_rules")
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Export Audio (MP3 / M4B)") },
-                                leadingIcon = {
-                                    Icon(Icons.Default.AudioFile, contentDescription = null)
-                                },
-                                enabled = uiState.book != null,
-                                onClick = {
-                                    showMoreMenu = false
-                                    val book = uiState.book ?: return@DropdownMenuItem
-                                    ExportChaptersActivity.launchForBook(
-                                        context = context,
-                                        title = book.title,
-                                        author = book.author,
-                                        fileKey = book.fileKey,
-                                        isDirectPath = book.isDirectPath,
-                                        coverPath = book.coverPath
-                                    )
-                                },
-                                modifier = Modifier.testTag("reader_export_audio_button")
-                            )
-                        }
-                    }
-                }
-            )
-        },
-        bottomBar = {
-            Box(modifier = Modifier.navigationBarsPadding()) {
-                TtsDockedBar(
-                    ttsState = ttsState,
-                    onOpenControlsSheet = { showTtsSheet = true },
-                    onPlayClick = {
-                        val action: () -> Unit = {
-                            if (isTtsPlayingThisBook) {
-                                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
-                            } else {
-                                val startIdx = (uiState.book?.currentSentenceIndex ?: 0).coerceAtLeast(0)
-                                viewModel.playFromSentence(startIdx)
-                            }
-                        }
-                        if (exportProgress.isRunning && !ttsState.isPlaying) {
-                            pendingTtsActionDuringExport = action
-                        } else {
-                            action()
-                        }
-                    }
-                )
+    val triggerReadAloudAction: () -> Unit = {
+        val action: () -> Unit = {
+            showAudioPlayerBar = true
+            if (isTtsPlayingThisBook) {
+                TtsPlaybackService.sendAction(context, TtsPlaybackService.ACTION_TOGGLE_PLAY_PAUSE)
+            } else {
+                val startIdx = (uiState.book?.currentSentenceIndex ?: 0).coerceAtLeast(0)
+                viewModel.playFromSentence(startIdx)
             }
         }
-    ) { paddingValues ->
+        if (exportProgress.isRunning && !ttsState.isPlaying) {
+            pendingTtsActionDuringExport = action
+        } else {
+            action()
+        }
+    }
+
+    val theme = readerSettings.themeMode
+    val isCustomTheme = theme == ReaderThemeMode.CUSTOM
+    val effectiveBg = remember(theme, readerSettings.customThemeBgHex) {
+        if (isCustomTheme) {
+            runCatching { Color(android.graphics.Color.parseColor(readerSettings.customThemeBgHex)) }
+                .getOrDefault(theme.background)
+        } else theme.background
+    }
+    val effectiveText = remember(theme, readerSettings.customThemeTextHex) {
+        if (isCustomTheme) {
+            runCatching { Color(android.graphics.Color.parseColor(readerSettings.customThemeTextHex)) }
+                .getOrDefault(theme.text)
+        } else theme.text
+    }
+    val effectiveChromeBg = remember(theme, readerSettings.customThemeBgHex) {
+        if (isCustomTheme) effectiveBg else theme.chromeBg
+    }
+    val effectiveSecondaryText = remember(theme, effectiveText) {
+        if (isCustomTheme) effectiveText.copy(alpha = 0.7f) else theme.secondaryText
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(effectiveBg)
+    ) {
+        // Full-Screen Book Content & Quiet Running Footer (edge-to-edge)
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(theme.background)
-                .padding(paddingValues)
+                .statusBarsPadding()
+                .navigationBarsPadding()
         ) {
             if (exportProgress.isRunning) {
                 Surface(
@@ -348,124 +345,433 @@ fun ReaderScreen(
                     }
                 }
             }
+
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
             ) {
-            when {
-                uiState.isLoading -> {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                }
-                uiState.errorMessage != null -> {
-                    Text(
-                        text = uiState.errorMessage.orEmpty(),
-                        color = theme.text,
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(24.dp)
-                    )
-                }
-                uiState.webChapterPayload != null && uiState.book != null -> {
-                    val book = uiState.book!!
-                    val payload = uiState.webChapterPayload!!
-                    val activeGlobalIdx = if (isTtsPlayingThisBook && ttsState.chapterIndex == uiState.currentChapterIndex) {
-                        ttsState.sentenceIndex
-                    } else {
-                        uiState.jumpHighlightSentenceIndex
+                when {
+                    uiState.isLoading -> {
+                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
                     }
+                    uiState.errorMessage != null -> {
+                        Text(
+                            text = uiState.errorMessage.orEmpty(),
+                            color = effectiveText,
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .padding(24.dp)
+                        )
+                    }
+                    uiState.webChapterPayload != null && uiState.book != null -> {
+                        val book = uiState.book!!
+                        val payload = uiState.webChapterPayload!!
+                        val activeGlobalIdx = if (isTtsPlayingThisBook && ttsState.chapterIndex == uiState.currentChapterIndex) {
+                            ttsState.sentenceIndex
+                        } else {
+                            uiState.jumpHighlightSentenceIndex
+                        }
 
-                    EpubWebView(
-                        fileKey = book.fileKey,
-                        isDirectPath = book.isDirectPath,
-                        chapterPayload = payload,
-                        readerSettings = readerSettings,
-                        activeSentenceIndex = activeGlobalIdx,
-                        hasPrevChapter = uiState.currentChapterIndex > 0,
-                        hasNextChapter = uiState.currentChapterIndex < uiState.chapters.lastIndex,
-                        onSentenceTapped = { sentenceIdx ->
-                            val action: () -> Unit = { viewModel.playFromSentence(sentenceIdx) }
-                            if (exportProgress.isRunning) {
-                                pendingTtsActionDuringExport = action
-                            } else {
-                                action()
-                            }
-                        },
-                        onPullPrevChapter = {
-                            if (uiState.currentChapterIndex > 0) {
-                                viewModel.selectChapter(uiState.currentChapterIndex - 1)
-                            }
-                        },
-                        onPullNextChapter = {
-                            if (uiState.currentChapterIndex < uiState.chapters.lastIndex) {
-                                viewModel.selectChapter(uiState.currentChapterIndex + 1)
-                            }
-                        },
-                        onScrollChanged = { y -> latestScrollY = y },
-                        onTextSelected = { selected ->
-                            selectedWordForRule = selected.trim()
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
+                        EpubWebView(
+                            fileKey = book.fileKey,
+                            isDirectPath = book.isDirectPath,
+                            chapterPayload = payload,
+                            readerSettings = readerSettings,
+                            activeSentenceIndex = activeGlobalIdx,
+                            hasPrevChapter = uiState.currentChapterIndex > 0,
+                            hasNextChapter = uiState.currentChapterIndex < uiState.chapters.lastIndex,
+                            chapterHighlights = chapterHighlights,
+                            enableSentenceTap = false,
+                            onSentenceTapped = { _ -> },
+                            onPullPrevChapter = {
+                                if (uiState.currentChapterIndex > 0) {
+                                    val jumpEnd = readerSettings.readingMode == ReaderMode.PAGED
+                                    viewModel.selectChapter(uiState.currentChapterIndex - 1, jumpToEnd = jumpEnd)
+                                }
+                            },
+                            onPullNextChapter = {
+                                if (uiState.currentChapterIndex < uiState.chapters.lastIndex) {
+                                    viewModel.selectChapter(uiState.currentChapterIndex + 1)
+                                } else if (!book.isFinished) {
+                                    showFinishBookDialog = true
+                                }
+                            },
+                            onEndOfBookReached = {
+                                if (uiState.currentChapterIndex >= uiState.chapters.lastIndex && !book.isFinished) {
+                                    showFinishBookDialog = true
+                                }
+                            },
+                            onScrollChanged = { y -> latestScrollY = y },
+                            onTextSelectedWithSentence = { selected, sentIdx ->
+                                selectedWordForRule = selected.trim()
+                                selectedSentenceForAction = sentIdx
+                            },
+                            initialPageOnLoad = uiState.initialPageOnLoad,
+                            targetPageTrigger = targetPageTrigger,
+                            pageFlipTrigger = pageFlipTrigger,
+                            onPageStateChanged = { cur, tot ->
+                                currentPage = cur
+                                totalPages = tot
+                            },
+                            onCenterTapped = {
+                                showReaderChrome = !showReaderChrome
+                            },
+                            onExternalLinkClicked = { url ->
+                                pendingExternalUrl = url
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 }
             }
 
-            androidx.compose.animation.AnimatedVisibility(
-                visible = selectedWordForRule.length in 1..120 && uiState.book != null,
-                enter = fadeIn(),
-                exit = fadeOut(),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(28.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    shadowElevation = 6.dp
+            // Quiet 24.dp Running Footer
+            if (!uiState.isLoading && uiState.errorMessage == null && uiState.chapters.isNotEmpty()) {
+                val chapterTitle = uiState.webChapterPayload?.chapterTitle
+                    ?.ifBlank { uiState.chapters.getOrNull(uiState.currentChapterIndex)?.title.orEmpty() }
+                    .orEmpty()
+                val bookPercent = (((uiState.currentChapterIndex + 1).toFloat() / uiState.chapters.size.coerceAtLeast(1)) * 100f)
+                    .roundToInt().coerceIn(0, 100)
+                val rightLabel = if (readerSettings.readingMode == ReaderMode.PAGED) {
+                    "Page ${currentPage + 1} / ${totalPages.coerceAtLeast(1)}  •  $bookPercent%"
+                } else {
+                    "Ch ${uiState.currentChapterIndex + 1} / ${uiState.chapters.size}  •  $bookPercent%"
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(24.dp)
+                        .background(effectiveBg)
+                        .padding(horizontal = 16.dp)
+                        .testTag("reader_running_footer"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .clickable { showQuickRuleDialog = true }
-                                .padding(vertical = 8.dp)
-                                .testTag("reader_add_rule_from_selection_button")
+                    Text(
+                        text = chapterTitle,
+                        fontSize = 11.sp,
+                        color = effectiveSecondaryText.copy(alpha = 0.65f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(end = 12.dp)
+                    )
+                    Text(
+                        text = rightLabel,
+                        fontSize = 11.sp,
+                        color = effectiveSecondaryText.copy(alpha = 0.65f),
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+
+        // Floating Top Bar Overlay
+        AnimatedVisibility(
+            visible = showReaderChrome,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopCenter)
+        ) {
+            Surface(
+                color = effectiveChromeBg.copy(alpha = 0.96f),
+                shadowElevation = 4.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                TopAppBar(
+                    modifier = Modifier.statusBarsPadding(),
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Transparent,
+                        titleContentColor = effectiveText,
+                        navigationIconContentColor = effectiveText,
+                        actionIconContentColor = effectiveText
+                    ),
+                    navigationIcon = {
+                        IconButton(
+                            onClick = {
+                                viewModel.saveScrollProgress(latestScrollY)
+                                onBack()
+                            },
+                            modifier = Modifier.testTag("reader_back_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.RecordVoiceOver,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(Modifier.width(8.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Library")
+                        }
+                    },
+                    title = {
+                        Column {
                             Text(
-                                text = "Add Rule: \"${selectedWordForRule.take(24)}\"",
-                                style = MaterialTheme.typography.labelLarge,
+                                text = uiState.book?.title ?: "Reader",
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            val chNum = if (uiState.chapters.isNotEmpty()) {
+                                val pagePart = if (readerSettings.readingMode == ReaderMode.PAGED) {
+                                    " • Pg ${currentPage + 1}/${totalPages.coerceAtLeast(1)}"
+                                } else ""
+                                "Ch ${uiState.currentChapterIndex + 1}/${uiState.chapters.size}$pagePart • ${uiState.webChapterPayload?.chapterTitle.orEmpty()}"
+                            } else {
+                                uiState.webChapterPayload?.chapterTitle.orEmpty()
+                            }
+                            Text(
+                                text = chNum,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = effectiveSecondaryText,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                    },
+                    actions = {
                         IconButton(
-                            onClick = { selectedWordForRule = "" },
-                            modifier = Modifier.size(36.dp)
+                            onClick = { showSearchSheet = true },
+                            modifier = Modifier
+                                .size(width = 38.dp, height = 48.dp)
+                                .testTag("reader_search_button")
+                        ) {
+                            Icon(Icons.Default.Search, contentDescription = "Search in Book")
+                        }
+                        IconButton(
+                            onClick = {
+                                val sentIdx = if (isTtsPlayingThisBook) ttsState.sentenceIndex else 0
+                                viewModel.toggleBookmarkAtCurrentPosition(sentIdx)
+                            },
+                            modifier = Modifier
+                                .size(width = 38.dp, height = 48.dp)
+                                .testTag("reader_bookmark_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Dismiss selection action",
-                                modifier = Modifier.size(16.dp)
+                                imageVector = if (chapterHasBookmark) Icons.Default.Bookmark else Icons.Default.BookmarkAdd,
+                                contentDescription = "Bookmark This Page",
+                                tint = if (chapterHasBookmark) MaterialTheme.colorScheme.primary else effectiveText
                             )
                         }
+                        IconButton(
+                            onClick = { showBookmarksSheet = true },
+                            modifier = Modifier
+                                .size(width = 38.dp, height = 48.dp)
+                                .testTag("reader_bookmarks_button")
+                        ) {
+                            Icon(Icons.Default.Bookmarks, contentDescription = "Bookmarks & Highlights")
+                        }
+                        IconButton(
+                            onClick = { showTocSheet = true },
+                            modifier = Modifier
+                                .size(width = 38.dp, height = 48.dp)
+                                .testTag("reader_toc_button")
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Table of Contents")
+                        }
+                        IconButton(
+                            onClick = {
+                                FloatingOverlayController.setVisible(context, !overlayState.isVisible)
+                            },
+                            modifier = Modifier
+                                .size(width = 38.dp, height = 48.dp)
+                                .testTag("reader_floating_popup_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PictureInPictureAlt,
+                                contentDescription = "Toggle Floating Playback Popup",
+                                tint = if (overlayState.isVisible) MaterialTheme.colorScheme.primary else effectiveText
+                            )
+                        }
+                        Box {
+                            IconButton(
+                                onClick = { showMoreMenu = true },
+                                modifier = Modifier
+                                    .size(width = 38.dp, height = 48.dp)
+                                    .testTag("reader_more_menu_button")
+                            ) {
+                                Icon(Icons.Default.MoreVert, contentDescription = "More Reader Options")
+                            }
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (isTtsPlayingThisBook && ttsState.isPlaying) "Pause Read Aloud" else "Read Aloud")
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (isTtsPlayingThisBook && ttsState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                            contentDescription = null
+                                        )
+                                    },
+                                    enabled = uiState.book != null && uiState.webChapterPayload != null,
+                                    onClick = {
+                                        showMoreMenu = false
+                                        triggerReadAloudAction()
+                                    },
+                                    modifier = Modifier.testTag("reader_menu_read_aloud")
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Bookmarks & Highlights (${allBookmarksAndHighlights.size})") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Bookmarks, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showBookmarksSheet = true
+                                    },
+                                    modifier = Modifier.testTag("reader_menu_bookmarks")
+                                )
+                                if (primaryAudiobook != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Open Synced Audiobook") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.Headphones, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            viewModel.syncCurrentProgressToAudiobook(primaryAudiobook) { aid ->
+                                                onOpenAudiobook(aid)
+                                            }
+                                        },
+                                        modifier = Modifier.testTag("reader_menu_open_audiobook")
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Pronunciation Rules") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.RecordVoiceOver, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        onOpenPronunciationRules(bookId)
+                                    },
+                                    modifier = Modifier.testTag("reader_menu_pronunciation_rules")
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Export Audio (MP3 / M4B)") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.AudioFile, contentDescription = null)
+                                    },
+                                    enabled = uiState.book != null,
+                                    onClick = {
+                                        showMoreMenu = false
+                                        val book = uiState.book ?: return@DropdownMenuItem
+                                        ExportChaptersActivity.launchForBook(
+                                            context = context,
+                                            title = book.title,
+                                            author = book.author,
+                                            fileKey = book.fileKey,
+                                            isDirectPath = book.isDirectPath,
+                                            coverPath = book.coverPath
+                                        )
+                                    },
+                                    modifier = Modifier.testTag("reader_export_audio_button")
+                                )
+                            }
+                        }
                     }
-                }
+                )
             }
+        }
+
+        // Rich Text Selection Action Bar
+        AnimatedVisibility(
+            visible = selectedWordForRule.length in 1..280 && uiState.book != null,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = if (showReaderChrome || showAudioPlayerBar) 130.dp else 32.dp)
+        ) {
+            TextSelectionActionBar(
+                selectedText = selectedWordForRule,
+                canReadFromHere = selectedSentenceForAction >= 0,
+                onHighlightColor = { hex ->
+                    viewModel.saveHighlight(
+                        sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
+                        selectedText = selectedWordForRule,
+                        colorHex = hex
+                    )
+                    selectedWordForRule = ""
+                    selectedSentenceForAction = -1
+                },
+                onReadAloudFromHere = {
+                    val idx = selectedSentenceForAction
+                    selectedWordForRule = ""
+                    selectedSentenceForAction = -1
+                    if (idx >= 0) {
+                        val action: () -> Unit = {
+                            showAudioPlayerBar = true
+                            viewModel.playFromSentence(idx)
+                        }
+                        if (exportProgress.isRunning) {
+                            pendingTtsActionDuringExport = action
+                        } else {
+                            action()
+                        }
+                    }
+                },
+                onDefineSelection = {
+                    val query = Uri.encode("define $selectedWordForRule")
+                    runCatching {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=$query"))
+                        )
+                    }
+                    selectedWordForRule = ""
+                },
+                onAddPronunciationRule = {
+                    showQuickRuleDialog = true
+                },
+                onDismiss = {
+                    selectedWordForRule = ""
+                    selectedSentenceForAction = -1
+                }
+            )
+        }
+
+        // Floating Bottom Appearance Capsule or Docked TTS Bar
+        AnimatedVisibility(
+            visible = showReaderChrome || showAudioPlayerBar,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 18.dp)
+        ) {
+            if (showAudioPlayerBar) {
+                ReaderAudioPlayerDockedBar(
+                    ttsState = ttsState,
+                    onOpenControlsSheet = { showTtsSheet = true },
+                    onPlayClick = triggerReadAloudAction,
+                    onCollapseToAppearance = { showAudioPlayerBar = false }
+                )
+            } else {
+                ReaderAppearanceBottomBar(
+                    readerSettings = readerSettings,
+                    currentChapterIndex = uiState.currentChapterIndex,
+                    totalChapters = uiState.chapters.size,
+                    currentPage = currentPage,
+                    totalPages = totalPages,
+                    isTtsActive = isTtsPlayingThisBook,
+                    onSelectChapter = { chIdx -> viewModel.selectChapter(chIdx) },
+                    onJumpToPage = { pg -> targetPageTrigger = pg to System.nanoTime() },
+                    onUpdateSettings = { transform -> viewModel.updateReaderSettings(transform) },
+                    onOpenTypographySheet = { showAppearanceSheet = true },
+                    onOpenCustomThemeDialog = { showCustomThemeDialog = true },
+                    onSwitchToAudioBar = { showAudioPlayerBar = true }
+                )
             }
         }
     }
 
+    // Auto-scrolling Table of Contents Sheet
     if (showTocSheet) {
+        val tocListState = rememberLazyListState()
+        LaunchedEffect(showTocSheet, uiState.currentChapterIndex) {
+            val target = uiState.currentChapterIndex.coerceAtLeast(0)
+            if (target < uiState.chapters.size) {
+                tocListState.scrollToItem(target)
+            }
+        }
         ModalBottomSheet(
             onDismissRequest = { showTocSheet = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -482,6 +788,7 @@ fun ReaderScreen(
                     modifier = Modifier.padding(bottom = 12.dp)
                 )
                 LazyColumn(
+                    state = tocListState,
                     modifier = Modifier.height(420.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -519,80 +826,75 @@ fun ReaderScreen(
         }
     }
 
+    if (showSearchSheet) {
+        InBookSearchSheet(
+            query = searchQuery,
+            isSearching = isSearching,
+            results = searchResults,
+            onQueryChange = { viewModel.updateSearchQuery(it) },
+            onSearchSubmit = { viewModel.executeInBookSearch() },
+            onJumpToResult = { hit ->
+                showSearchSheet = false
+                viewModel.requestJumpToLocation(bookId, hit.chapterIndex, hit.sentenceIndex)
+            },
+            onDismiss = { showSearchSheet = false }
+        )
+    }
+
+    if (showBookmarksSheet) {
+        BookmarksAndHighlightsSheet(
+            items = allBookmarksAndHighlights,
+            onJumpToItem = { item ->
+                showBookmarksSheet = false
+                viewModel.requestJumpToLocation(bookId, item.chapterIndex, item.sentenceIndex)
+            },
+            onDeleteItem = { id -> viewModel.deleteBookmarkOrHighlight(id) },
+            onDismiss = { showBookmarksSheet = false }
+        )
+    }
+
     if (showAppearanceSheet) {
-        ModalBottomSheet(onDismissRequest = { showAppearanceSheet = false }) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp)
-                    .padding(bottom = 28.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text("Reader Appearance", style = MaterialTheme.typography.titleLarge)
+        ReaderTypographySheet(
+            readerSettings = readerSettings,
+            onUpdateSettings = { transform -> viewModel.updateReaderSettings(transform) },
+            onOpenCustomCssDialog = { showCustomCssDialog = true },
+            onPickCustomFont = { fontPickerLauncher.launch(arrayOf("font/ttf", "font/otf", "application/x-font-ttf", "application/font-sfnt", "*/*")) },
+            importedFonts = importedCustomFonts,
+            onSelectImportedFont = { name -> viewModel.selectCustomFont(name) },
+            onDeleteImportedFont = { name -> viewModel.deleteCustomFont(name) },
+            onDismiss = { showAppearanceSheet = false }
+        )
+    }
 
-                Text("Theme", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ReaderThemeMode.entries.forEach { mode ->
-                        FilterChip(
-                            selected = readerSettings.themeMode == mode,
-                            onClick = { viewModel.updateReaderSettings { it.copy(themeMode = mode) } },
-                            label = { Text(mode.label) }
-                        )
-                    }
-                }
+    if (showCustomCssDialog) {
+        CustomCssEditorDialog(
+            initialCss = readerSettings.customCss,
+            onDismiss = { showCustomCssDialog = false },
+            onSave = { newCss ->
+                viewModel.updateReaderSettings { it.copy(customCss = newCss) }
+                showCustomCssDialog = false
+            }
+        )
+    }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Font Size", style = MaterialTheme.typography.titleSmall)
-                    Text("${readerSettings.fontSizeSp.roundToInt()} sp", style = MaterialTheme.typography.labelLarge)
-                }
-                Slider(
-                    value = readerSettings.fontSizeSp,
-                    onValueChange = { sz -> viewModel.updateReaderSettings { it.copy(fontSizeSp = sz) } },
-                    valueRange = 14f..30f
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Line Spacing", style = MaterialTheme.typography.titleSmall)
-                    Text(String.format(Locale.US, "%.2fx", readerSettings.lineSpacing), style = MaterialTheme.typography.labelLarge)
-                }
-                Slider(
-                    value = readerSettings.lineSpacing,
-                    onValueChange = { sp -> viewModel.updateReaderSettings { it.copy(lineSpacing = sp) } },
-                    valueRange = 1.15f..2.0f
-                )
-
-                Text("Margins", style = MaterialTheme.typography.titleSmall)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    listOf("Compact" to 12, "Normal" to 20, "Wide" to 32).forEach { (label, dpVal) ->
-                        FilterChip(
-                            selected = readerSettings.horizontalMarginDp == dpVal,
-                            onClick = { viewModel.updateReaderSettings { it.copy(horizontalMarginDp = dpVal) } },
-                            label = { Text(label) }
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Serif Book Font (Literata)", style = MaterialTheme.typography.titleSmall)
-                    Switch(
-                        checked = readerSettings.useSerifFont,
-                        onCheckedChange = { serif ->
-                            viewModel.updateReaderSettings { it.copy(useSerifFont = serif) }
-                        }
+    if (showCustomThemeDialog) {
+        CustomThemeCreatorDialog(
+            initialBg = readerSettings.customThemeBgHex,
+            initialText = readerSettings.customThemeTextHex,
+            initialLink = readerSettings.customThemeLinkHex,
+            onDismiss = { showCustomThemeDialog = false },
+            onSave = { bg, text, link ->
+                viewModel.updateReaderSettings {
+                    it.copy(
+                        themeMode = ReaderThemeMode.CUSTOM,
+                        customThemeBgHex = bg,
+                        customThemeTextHex = text,
+                        customThemeLinkHex = link
                     )
                 }
+                showCustomThemeDialog = false
             }
-        }
+        )
     }
 
     if (showTtsSheet) {
@@ -623,6 +925,63 @@ fun ReaderScreen(
                     )
                     showQuickRuleDialog = false
                     selectedWordForRule = ""
+                    selectedSentenceForAction = -1
+                }
+            }
+        )
+    }
+
+    val externalUrl = pendingExternalUrl
+    if (externalUrl != null) {
+        AlertDialog(
+            onDismissRequest = { pendingExternalUrl = null },
+            title = { Text("Open External Link?") },
+            text = {
+                Text("Do you want to open this external web link in your browser?\n\n$externalUrl")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingExternalUrl = null
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl)))
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_open_external_link")
+                ) {
+                    Text("Open Browser")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingExternalUrl = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showFinishBookDialog) {
+        AlertDialog(
+            onDismissRequest = { showFinishBookDialog = false },
+            icon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+            title = { Text("Reached End of Book") },
+            text = {
+                Text("You've reached the end of \"${uiState.book?.title ?: "this book"}\". Mark this book as Finished?")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.markCurrentBookFinished(true)
+                        showFinishBookDialog = false
+                    },
+                    modifier = Modifier.testTag("confirm_finish_book_button")
+                ) {
+                    Text("Mark as Finished")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showFinishBookDialog = false }) {
+                    Text("Keep Reading")
                 }
             }
         )

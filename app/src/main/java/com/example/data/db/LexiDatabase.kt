@@ -23,9 +23,11 @@ class LexiTypeConverters {
         WatchedFolderEntity::class,
         BookEntity::class,
         AudiobookEntity::class,
-        PronunciationRuleEntity::class
+        PronunciationRuleEntity::class,
+        BookmarkEntity::class,
+        ShelfEntity::class
     ],
-    version = 4,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(LexiTypeConverters::class)
@@ -34,6 +36,8 @@ abstract class LexiDatabase : RoomDatabase() {
     abstract fun folderDao(): FolderDao
     abstract fun audiobookDao(): AudiobookDao
     abstract fun pronunciationRuleDao(): PronunciationRuleDao
+    abstract fun bookmarkDao(): BookmarkDao
+    abstract fun shelfDao(): ShelfDao
 
     companion object {
         @Volatile
@@ -100,6 +104,46 @@ abstract class LexiDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `books` ADD COLUMN `shelfId` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `books` ADD COLUMN `isHidden` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `books` ADD COLUMN `isFinished` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `bookmarks` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `bookId` INTEGER NOT NULL,
+                        `chapterIndex` INTEGER NOT NULL,
+                        `sentenceIndex` INTEGER NOT NULL,
+                        `selectedText` TEXT NOT NULL,
+                        `note` TEXT NOT NULL,
+                        `colorHex` TEXT NOT NULL,
+                        `type` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_bookmarks_bookId` ON `bookmarks` (`bookId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_bookmarks_book_chap_sent` ON `bookmarks` (`bookId`, `chapterIndex`, `sentenceIndex`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `shelves` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `books` ADD COLUMN `parentFolderName` TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun getInstance(context: Context): LexiDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -107,7 +151,7 @@ abstract class LexiDatabase : RoomDatabase() {
                     LexiDatabase::class.java,
                     "lexivoice_library.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }

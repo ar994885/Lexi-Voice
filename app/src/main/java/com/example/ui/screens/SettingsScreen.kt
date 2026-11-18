@@ -93,6 +93,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.LexiVoiceApplication
 import com.example.data.prefs.FloatingAppearanceMode
 import com.example.data.prefs.FloatingOverlaySettings
+import com.example.data.prefs.ReaderSettings
 import com.example.overlay.FloatingOverlayController
 import com.example.overlay.OverlayStyleHelper
 import com.example.tts.TtsStateHolder
@@ -135,6 +136,9 @@ fun SettingsScreen(
     val savedExportFolders by prefsRepo.savedExportFolders.collectAsStateWithLifecycle(initialValue = emptyList())
     val overlaySettings by prefsRepo.floatingOverlaySettings.collectAsStateWithLifecycle(
         initialValue = FloatingOverlaySettings()
+    )
+    val readerSettings by prefsRepo.readerSettings.collectAsStateWithLifecycle(
+        initialValue = ReaderSettings()
     )
 
     var resumeTick by remember { mutableIntStateOf(0) }
@@ -314,6 +318,74 @@ fun SettingsScreen(
                         scope.launch { prefsRepo.updateFloatingOverlaySettings(transform) }
                     }
                 )
+            }
+
+            item {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Reader & Library Behavior",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Show Folder Categories in Library", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Display indexed folder filter pills in the Library screen",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = readerSettings.showLibraryFolders,
+                                onCheckedChange = { checked ->
+                                    scope.launch {
+                                        prefsRepo.updateReaderSettings { it.copy(showLibraryFolders = checked) }
+                                    }
+                                },
+                                modifier = Modifier.testTag("settings_show_library_folders_switch")
+                            )
+                        }
+                        HorizontalDivider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Volume Keys Turn Pages", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Use Volume Down / Up to turn pages or scroll while reading",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = readerSettings.volumeKeysTurnPages,
+                                onCheckedChange = { checked ->
+                                    scope.launch {
+                                        prefsRepo.updateReaderSettings { it.copy(volumeKeysTurnPages = checked) }
+                                    }
+                                },
+                                modifier = Modifier.testTag("settings_volume_keys_switch")
+                            )
+                        }
+                    }
+                }
             }
 
             item {

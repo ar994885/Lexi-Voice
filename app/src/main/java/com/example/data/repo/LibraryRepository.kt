@@ -1,8 +1,12 @@
 package com.example.data.repo
 
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
 import com.example.data.db.BookDao
 import com.example.data.db.BookEntity
@@ -37,12 +41,39 @@ class LibraryRepository(
     val folders: Flow<List<WatchedFolderEntity>> = folderDao.observeFolders()
     val recentBooks: Flow<List<BookEntity>> = bookDao.observeRecentBooks()
     val totalBookCount: Flow<Int> = bookDao.observeTotalCount()
+    val distinctLanguages: Flow<List<String>> = bookDao.observeDistinctLanguages()
+
+    fun observeLibraryBooks(
+        searchQuery: String = "",
+        folderFilter: String? = null,
+        shelfId: Long? = null,
+        progressFilter: String? = null,
+        languageFilter: String? = null,
+        showHidden: Boolean = false,
+        sortOption: LibrarySortOption = LibrarySortOption.RECENT
+    ): Flow<List<BookEntity>> = bookDao.observeLibraryBooks(
+        searchQuery = searchQuery,
+        folderFilter = folderFilter,
+        shelfId = shelfId,
+        progressFilter = progressFilter,
+        languageFilter = languageFilter,
+        showHidden = showHidden,
+        sortOption = sortOption
+    )
 
     fun observeLibraryBooks(
         searchQuery: String,
         folderFilter: String?,
         sortOption: LibrarySortOption
-    ): Flow<List<BookEntity>> = bookDao.observeLibraryBooks(searchQuery, folderFilter, sortOption)
+    ): Flow<List<BookEntity>> = observeLibraryBooks(
+        searchQuery = searchQuery,
+        folderFilter = folderFilter,
+        shelfId = null,
+        progressFilter = null,
+        languageFilter = null,
+        showHidden = false,
+        sortOption = sortOption
+    )
 
     fun observeBook(bookId: Long): Flow<BookEntity?> = bookDao.observeBookById(bookId)
 
@@ -91,6 +122,7 @@ class LibraryRepository(
         val entity = BookEntity(
             fileKey = key,
             folderKey = SINGLE_IMPORTS_FOLDER,
+            parentFolderName = "Imported Files",
             isDirectPath = false,
             title = meta.title,
             author = meta.author,
@@ -128,6 +160,244 @@ class LibraryRepository(
             progressPercent = pct,
             lastOpenedAt = syncedAt
         )
+    }
+
+    suspend fun updateBookShelf(bookId: Long, shelfId: Long) = withContext(Dispatchers.IO) {
+        bookDao.updateBookShelf(bookId, shelfId)
+    }
+
+    suspend fun updateBookFinished(bookId: Long, isFinished: Boolean) = withContext(Dispatchers.IO) {
+        bookDao.updateBookFinished(bookId, isFinished)
+    }
+
+    suspend fun updateBookHidden(bookId: Long, isHidden: Boolean) = withContext(Dispatchers.IO) {
+        bookDao.updateBookHidden(bookId, isHidden)
+    }
+
+    suspend fun deleteBook(book: BookEntity, deleteFilePermanently: Boolean) = withContext(Dispatchers.IO) {
+        if (deleteFilePermanently) {
+            runCatching {
+                if (book.isDirectPath) {
+                    File(book.fileKey).delete()
+                } else {
+                    DocumentFile.fromSingleUri(context, Uri.parse(book.fileKey))?.delete()
+                }
+            }
+        }
+        bookDao.deleteBookById(book.id)
+    }
+
+    suspend fun scanDeviceForEpubs() = withContext(Dispatchers.IO) {
+        val root = Environment.getExternalStorageDirectory()
+        val hasDirectAccess = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            root.exists() && root.canRead()
+        }
+        _scanProgress.value = ScanProgressState(isScanning = true, currentFolderName = "Device Storage")
+        try {
+            val discoveredDirs = linkedMapOf<String, MutableList<File>>()
+            var scanned = 0
+            if (hasDirectAccess && root.exists() && root.isDirectory) {
+                root.walkTopDown()
+                    .onEnter { dir ->
+                        val name = dir.name
+                        !name.startsWith(".") &&
+                            dir.absolutePath != File(root, "Android").absolutePath
+                    }
+                    .filter { it.isFile && it.name.endsWith(".epub", ignoreCase = true) }
+                    .forEach { file ->
+                        scanned++
+                        val parent = file.parentFile ?: root
+                        discoveredDirs.getOrPut(parent.absolutePath) { mutableListOf() }.add(file)
+                        if (scanned % 25 == 0) {
+                            _scanProgress.value = _scanProgress.value.copy(
+                                scannedFiles = scanned,
+                                currentFolderName = parent.name.ifBlank { "Device Storage" },
+                                currentFileName = file.name
+                            )
+                        }
+                    }
+            }
+
+            var newlyIndexed = 0
+            if (discoveredDirs.isNotEmpty()) {
+                for ((dirPath, files) in discoveredDirs) {
+                    val dirFile = File(dirPath)
+                    val folderDisplayName = dirFile.name.ifBlank { dirPath }
+                    val folderEntity = WatchedFolderEntity(
+                        uriOrPath = dirPath,
+                        displayName = folderDisplayName,
+                        isDirectPath = true,
+                        addedAt = System.currentTimeMillis()
+                    )
+                    folderDao.upsertFolder(folderEntity)
+                    val existingMap = bookDao.getBooksForFolder(dirPath).associateBy { it.fileKey }
+                    val batch = mutableListOf<BookEntity>()
+                    for (file in files) {
+                        val fileKey = file.absolutePath
+                        val size = file.length()
+                        val mod = file.lastModified()
+                        val existing = existingMap[fileKey]
+                        val unchanged = existing != null &&
+                            existing.lastModified == mod &&
+                            existing.fileSizeBytes == size &&
+                            existing.parentFolderName.isNotBlank() &&
+                            (existing.coverPath == null || File(existing.coverPath).exists())
+                        if (!unchanged) {
+                            _scanProgress.value = _scanProgress.value.copy(
+                                isScanning = true,
+                                scannedFiles = scanned,
+                                newlyIndexed = newlyIndexed,
+                                currentFolderName = folderDisplayName,
+                                currentFileName = file.name
+                            )
+                            val meta = EpubParser.extractMetadataForIndexing(
+                                context = context,
+                                fileKey = fileKey,
+                                isDirectPath = true,
+                                fallbackFileName = file.name
+                            )
+                            batch.add(
+                                BookEntity(
+                                    fileKey = fileKey,
+                                    folderKey = dirPath,
+                                    parentFolderName = folderDisplayName,
+                                    isDirectPath = true,
+                                    title = meta.title,
+                                    author = meta.author,
+                                    language = meta.language,
+                                    coverPath = meta.coverPath,
+                                    chapterCount = meta.chapterCount,
+                                    fileSizeBytes = size,
+                                    lastModified = mod,
+                                    addedAt = existing?.addedAt ?: System.currentTimeMillis()
+                                )
+                            )
+                            newlyIndexed++
+                        }
+                    }
+                    if (batch.isNotEmpty()) {
+                        bookDao.upsertPreservingProgress(batch)
+                    }
+                    val count = bookDao.countBooksInFolder(dirPath)
+                    folderDao.updateSyncStats(dirPath, System.currentTimeMillis(), count)
+                }
+            } else {
+                // MediaStore fallback when MANAGE_EXTERNAL_STORAGE is unavailable
+                scanMediaStoreEpubs()
+            }
+        } finally {
+            _scanProgress.value = ScanProgressState(isScanning = false)
+        }
+    }
+
+    private suspend fun scanMediaStoreEpubs() {
+        val collection = MediaStore.Files.getContentUri("external")
+        val relPathCol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Files.FileColumns.RELATIVE_PATH
+        } else {
+            @Suppress("DEPRECATION")
+            MediaStore.Files.FileColumns.DATA
+        }
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.DATE_MODIFIED,
+            relPathCol
+        )
+        val selection = "${MediaStore.Files.FileColumns.MIME_TYPE} = ? OR ${MediaStore.Files.FileColumns.DISPLAY_NAME} LIKE ?"
+        val selectionArgs = arrayOf("application/epub+zip", "%.epub")
+
+        val grouped = linkedMapOf<String, MutableList<Triple<Uri, String, Pair<Long, Long>>>>()
+        var scanned = 0
+        runCatching {
+            context.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
+                val idIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns._ID)
+                val nameIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                val sizeIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
+                val modIdx = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATE_MODIFIED)
+                val pathIdx = cursor.getColumnIndex(relPathCol)
+
+                while (cursor.moveToNext()) {
+                    val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
+                    val name = if (nameIdx >= 0) cursor.getString(nameIdx).orEmpty() else ""
+                    if (name.isBlank()) continue
+                    val size = if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) cursor.getLong(sizeIdx) else 0L
+                    val mod = if (modIdx >= 0 && !cursor.isNull(modIdx)) cursor.getLong(modIdx) * 1000L else 0L
+                    val rawPath = if (pathIdx >= 0) cursor.getString(pathIdx).orEmpty() else ""
+                    val folderName = rawPath.trim('/').substringAfterLast('/', "Device Storage")
+                        .ifBlank { "Device Storage" }
+                    val uri = ContentUris.withAppendedId(collection, id)
+                    grouped.getOrPut(folderName) { mutableListOf() }
+                        .add(Triple(uri, name, size to mod))
+                    scanned++
+                }
+            }
+        }
+
+        var newlyIndexed = 0
+        for ((folderName, items) in grouped) {
+            val folderKey = "mediastore://$folderName"
+            folderDao.upsertFolder(
+                WatchedFolderEntity(
+                    uriOrPath = folderKey,
+                    displayName = folderName,
+                    isDirectPath = false,
+                    addedAt = System.currentTimeMillis()
+                )
+            )
+            val existingMap = bookDao.getBooksForFolder(folderKey).associateBy { it.fileKey }
+            val batch = mutableListOf<BookEntity>()
+            for ((uri, name, sizeAndMod) in items) {
+                val (size, mod) = sizeAndMod
+                val fileKey = uri.toString()
+                val existing = existingMap[fileKey]
+                val unchanged = existing != null &&
+                    existing.lastModified == mod &&
+                    existing.fileSizeBytes == size &&
+                    existing.parentFolderName.isNotBlank() &&
+                    (existing.coverPath == null || File(existing.coverPath).exists())
+                if (!unchanged) {
+                    _scanProgress.value = _scanProgress.value.copy(
+                        isScanning = true,
+                        scannedFiles = scanned,
+                        newlyIndexed = newlyIndexed,
+                        currentFolderName = folderName,
+                        currentFileName = name
+                    )
+                    val meta = EpubParser.extractMetadataForIndexing(
+                        context = context,
+                        fileKey = fileKey,
+                        isDirectPath = false,
+                        fallbackFileName = name
+                    )
+                    batch.add(
+                        BookEntity(
+                            fileKey = fileKey,
+                            folderKey = folderKey,
+                            parentFolderName = folderName,
+                            isDirectPath = false,
+                            title = meta.title,
+                            author = meta.author,
+                            language = meta.language,
+                            coverPath = meta.coverPath,
+                            chapterCount = meta.chapterCount,
+                            fileSizeBytes = size,
+                            lastModified = mod,
+                            addedAt = existing?.addedAt ?: System.currentTimeMillis()
+                        )
+                    )
+                    newlyIndexed++
+                }
+            }
+            if (batch.isNotEmpty()) {
+                bookDao.upsertPreservingProgress(batch)
+            }
+            val count = bookDao.countBooksInFolder(folderKey)
+            folderDao.updateSyncStats(folderKey, System.currentTimeMillis(), count)
+        }
     }
 
     suspend fun syncAllFolders() = withContext(Dispatchers.IO) {
@@ -192,6 +462,7 @@ class LibraryRepository(
                     BookEntity(
                         fileKey = fileKey,
                         folderKey = folder.uriOrPath,
+                        parentFolderName = folder.displayName,
                         isDirectPath = isDirectPath,
                         title = meta.title,
                         author = meta.author,

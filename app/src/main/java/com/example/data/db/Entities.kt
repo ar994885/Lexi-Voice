@@ -23,7 +23,10 @@ data class WatchedFolderEntity(
         Index(value = ["title"]),
         Index(value = ["author"]),
         Index(value = ["lastOpenedAt"]),
-        Index(value = ["addedAt"])
+        Index(value = ["addedAt"]),
+        Index(value = ["shelfId"]),
+        Index(value = ["isHidden"]),
+        Index(value = ["isFinished"])
     ]
 )
 data class BookEntity(
@@ -31,6 +34,7 @@ data class BookEntity(
     val id: Long = 0L,
     val fileKey: String,
     val folderKey: String,
+    val parentFolderName: String = "",
     val isDirectPath: Boolean,
     val title: String,
     val author: String,
@@ -44,7 +48,10 @@ data class BookEntity(
     val currentChapterIndex: Int = 0,
     val currentSentenceIndex: Int = 0,
     val scrollOffset: Int = 0,
-    val progressPercent: Float = 0f
+    val progressPercent: Float = 0f,
+    val shelfId: Long = 0L,
+    val isHidden: Boolean = false,
+    val isFinished: Boolean = false
 )
 
 @Entity(
@@ -78,6 +85,34 @@ data class AudiobookEntity(
     val lastPositionMs: Long = 0L,
     val lastPlayedAt: Long = 0L,
     val addedAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "bookmarks",
+    indices = [
+        Index(value = ["bookId"]),
+        Index(value = ["bookId", "chapterIndex", "sentenceIndex"])
+    ]
+)
+data class BookmarkEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    val bookId: Long,
+    val chapterIndex: Int,
+    val sentenceIndex: Int,
+    val selectedText: String,
+    val note: String = "",
+    val colorHex: String = "#FFEB3B",
+    val type: String = "HIGHLIGHT", // HIGHLIGHT or BOOKMARK
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(tableName = "shelves")
+data class ShelfEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    val name: String,
+    val createdAt: Long = System.currentTimeMillis()
 )
 
 enum class PronunciationScope {

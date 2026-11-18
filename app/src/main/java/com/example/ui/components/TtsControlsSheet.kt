@@ -110,6 +110,7 @@ fun TtsDockedBar(
     ttsState: TtsPlaybackState,
     onOpenControlsSheet: () -> Unit,
     onPlayClick: () -> Unit,
+    onClose: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -169,17 +170,18 @@ fun TtsDockedBar(
                 }
 
                 val ctx = LocalContext.current
+                val compactBtnMod = if (onClose != null) Modifier.size(34.dp) else Modifier
                 if (ttsState.sourceType == TtsSourceType.BOOK) {
                     IconButton(
                         onClick = { TtsPlaybackService.sendAction(ctx, TtsPlaybackService.ACTION_PREV_CHAPTER) },
-                        modifier = Modifier.testTag("tts_prev_chapter_button")
+                        modifier = compactBtnMod.testTag("tts_prev_chapter_button")
                     ) {
                         Icon(Icons.Default.SkipPrevious, contentDescription = "Previous Chapter")
                     }
                 }
                 IconButton(
                     onClick = { TtsPlaybackService.sendAction(ctx, TtsPlaybackService.ACTION_PREV_SENTENCE) },
-                    modifier = Modifier.testTag("tts_prev_sentence_button")
+                    modifier = compactBtnMod.testTag("tts_prev_sentence_button")
                 ) {
                     Icon(Icons.Default.FastRewind, contentDescription = "Previous Sentence")
                 }
@@ -187,7 +189,7 @@ fun TtsDockedBar(
                 FilledIconButton(
                     onClick = onPlayClick,
                     modifier = Modifier
-                        .size(48.dp)
+                        .size(44.dp)
                         .testTag("tts_play_pause_button")
                 ) {
                     Icon(
@@ -198,7 +200,7 @@ fun TtsDockedBar(
 
                 IconButton(
                     onClick = { TtsPlaybackService.sendAction(ctx, TtsPlaybackService.ACTION_NEXT_SENTENCE) },
-                    modifier = Modifier.testTag("tts_next_sentence_button")
+                    modifier = compactBtnMod.testTag("tts_next_sentence_button")
                 ) {
                     Icon(Icons.Default.FastForward, contentDescription = "Next Sentence")
                 }
@@ -206,7 +208,7 @@ fun TtsDockedBar(
                 if (ttsState.sourceType == TtsSourceType.BOOK) {
                     IconButton(
                         onClick = { TtsPlaybackService.sendAction(ctx, TtsPlaybackService.ACTION_NEXT_CHAPTER) },
-                        modifier = Modifier.testTag("tts_next_chapter_button")
+                        modifier = compactBtnMod.testTag("tts_next_chapter_button")
                     ) {
                         Icon(Icons.Default.SkipNext, contentDescription = "Next Chapter")
                     }
@@ -214,9 +216,23 @@ fun TtsDockedBar(
 
                 IconButton(
                     onClick = onOpenControlsSheet,
-                    modifier = Modifier.testTag("tts_open_settings_sheet_button")
+                    modifier = compactBtnMod.testTag("tts_open_settings_sheet_button")
                 ) {
                     Icon(Icons.Default.Tune, contentDescription = "Engine, Language, Voice & Sleep Timer")
+                }
+
+                if (onClose != null) {
+                    IconButton(
+                        onClick = onClose,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .testTag("reader_close_audio_bar_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Return to Reader Appearance Bar"
+                        )
+                    }
                 }
             }
         }

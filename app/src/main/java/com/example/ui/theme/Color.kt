@@ -52,33 +52,92 @@ enum class ReaderThemeMode(
     val secondaryText: Color,
     val highlightBg: Color,
     val highlightText: Color,
-    val chromeBg: Color
+    val chromeBg: Color,
+    val isDark: Boolean
 ) {
-    LIGHT(
-        label = "Light",
+    PAPER_WHITE(
+        label = "Paper White",
         background = Color(0xFFFCFBF7),
         text = Color(0xFF1B1E23),
         secondaryText = Color(0xFF606670),
         highlightBg = Color(0xFFFFDF9E),
         highlightText = Color(0xFF1B1E23),
-        chromeBg = Color(0xFFF3EFE6)
+        chromeBg = Color(0xFFF3EFE6),
+        isDark = false
     ),
-    SEPIA(
-        label = "Sepia",
+    WARM_SEPIA(
+        label = "Warm Sepia",
         background = Color(0xFFF4EBD9),
         text = Color(0xFF3B2E22),
         secondaryText = Color(0xFF705D4B),
         highlightBg = Color(0xFFECC072),
         highlightText = Color(0xFF2A1E13),
-        chromeBg = Color(0xFFE9DEC8)
+        chromeBg = Color(0xFFE9DEC8),
+        isDark = false
     ),
-    DARK(
-        label = "Dark",
-        background = Color(0xFF12151B),
+    SOFT_CREAM(
+        label = "Soft Cream",
+        background = Color(0xFFF8F4E8),
+        text = Color(0xFF2E2A23),
+        secondaryText = Color(0xFF6D675B),
+        highlightBg = Color(0xFFF2D68B),
+        highlightText = Color(0xFF252019),
+        chromeBg = Color(0xFFEEE8D8),
+        isDark = false
+    ),
+    DARK_SLATE(
+        label = "Dark Slate",
+        background = Color(0xFF141820),
         text = Color(0xFFE3DFD6),
         secondaryText = Color(0xFF939AA6),
         highlightBg = Color(0xFF614418),
         highlightText = Color(0xFFFFF4DE),
-        chromeBg = Color(0xFF1A1F28)
-    )
+        chromeBg = Color(0xFF1C222D),
+        isDark = true
+    ),
+    AMOLED_BLACK(
+        label = "AMOLED Black",
+        background = Color(0xFF000000),
+        text = Color(0xFFDADADA),
+        secondaryText = Color(0xFF8B8E94),
+        highlightBg = Color(0xFF4F3814),
+        highlightText = Color(0xFFFFF4DE),
+        chromeBg = Color(0xFF0D0E10),
+        isDark = true
+    ),
+    EYE_COMFORT_GREEN(
+        label = "Eye-Comfort Green",
+        background = Color(0xFFDDEBD8),
+        text = Color(0xFF1E3022),
+        secondaryText = Color(0xFF4E6652),
+        highlightBg = Color(0xFFA8D5A3),
+        highlightText = Color(0xFF112114),
+        chromeBg = Color(0xFFCFE2C9),
+        isDark = false
+    ),
+    CUSTOM(
+        label = "Custom",
+        background = Color(0xFFFFFDF9),
+        text = Color(0xFF171A21),
+        secondaryText = Color(0xFF565C66),
+        highlightBg = Color(0xFFFFDF9E),
+        highlightText = Color(0xFF171A21),
+        chromeBg = Color(0xFFEDE6DA),
+        isDark = false
+    );
+
+
+    companion object {
+        fun fromStoredName(raw: String?): ReaderThemeMode {
+            return when (raw?.trim()?.uppercase()) {
+                "LIGHT", "PAPER_WHITE" -> PAPER_WHITE
+                "SEPIA", "WARM_SEPIA" -> WARM_SEPIA
+                "DARK", "DARK_SLATE" -> DARK_SLATE
+                else -> runCatching {
+                    if (raw.isNullOrBlank()) WARM_SEPIA else valueOf(raw)
+                }.getOrDefault(WARM_SEPIA)
+            }
+        }
+    }
 }
+

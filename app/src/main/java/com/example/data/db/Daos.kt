@@ -12,9 +12,11 @@ import kotlinx.coroutines.flow.Flow
 
 enum class LibrarySortOption(val label: String) {
     RECENT("Recent"),
-    TITLE("Title"),
-    AUTHOR("Author"),
-    DATE_ADDED("Date Added")
+    TITLE("Title (A–Z)"),
+    AUTHOR("Author (A–Z)"),
+    DATE_ADDED("Date Added"),
+    PROGRESS_ASC("Progress (0% → 100%)"),
+    PROGRESS_DESC("Progress (100% → 0%)")
 }
 
 @Dao
@@ -37,10 +39,10 @@ interface FolderDao {
 
 @Dao
 interface BookDao {
-    @Query("SELECT * FROM books WHERE lastOpenedAt > 0 ORDER BY lastOpenedAt DESC LIMIT 12")
+    @Query("SELECT * FROM books WHERE lastOpenedAt > 0 AND isHidden = 0 ORDER BY lastOpenedAt DESC LIMIT 12")
     fun observeRecentBooks(): Flow<List<BookEntity>>
 
-    @Query("SELECT COUNT(*) FROM books")
+    @Query("SELECT COUNT(*) FROM books WHERE isHidden = 0")
     fun observeTotalCount(): Flow<Int>
 
     @Query("SELECT * FROM books WHERE id = :bookId LIMIT 1")
@@ -58,6 +60,9 @@ interface BookDao {
     @Query("SELECT COUNT(*) FROM books WHERE folderKey = :folderKey")
     suspend fun countBooksInFolder(folderKey: String): Int
 
+    @Query("SELECT DISTINCT language FROM books WHERE language != '' ORDER BY language ASC")
+    fun observeDistinctLanguages(): Flow<List<String>>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertBooksIgnore(books: List<BookEntity>): List<Long>
 
@@ -67,6 +72,7 @@ interface BookDao {
     @Query(
         """
         UPDATE books SET
+            parentFolderName = :parentFolderName,
             title = :title,
             author = :author,
             language = :language,
@@ -79,6 +85,7 @@ interface BookDao {
     )
     suspend fun updateBookMetadata(
         fileKey: String,
+        parentFolderName: String,
         title: String,
         author: String,
         language: String,
@@ -95,6 +102,7 @@ interface BookDao {
             if (inserted == -1L) {
                 updateBookMetadata(
                     fileKey = book.fileKey,
+                    parentFolderName = book.parentFolderName,
                     title = book.title,
                     author = book.author,
                     language = book.language,
@@ -114,7 +122,8 @@ interface BookDao {
             currentSentenceIndex = :sentenceIndex,
             scrollOffset = :scrollOffset,
             progressPercent = :progressPercent,
-            lastOpenedAt = :lastOpenedAt
+            lastOpenedAt = :lastOpenedAt,
+            isFinished = CASE WHEN :progressPercent >= 0.99 THEN 1 ELSE isFinished END
         WHERE id = :bookId
         """
     )
@@ -126,6 +135,15 @@ interface BookDao {
         progressPercent: Float,
         lastOpenedAt: Long
     )
+
+    @Query("UPDATE books SET shelfId = :shelfId WHERE id = :bookId")
+    suspend fun updateBookShelf(bookId: Long, shelfId: Long)
+
+    @Query("UPDATE books SET isFinished = :isFinished WHERE id = :bookId")
+    suspend fun updateBookFinished(bookId: Long, isFinished: Boolean)
+
+    @Query("UPDATE books SET isHidden = :isHidden WHERE id = :bookId")
+    suspend fun updateBookHidden(bookId: Long, isHidden: Boolean)
 
     @Query("DELETE FROM books WHERE folderKey = :folderKey AND fileKey NOT IN (:activeKeys)")
     suspend fun deleteMissingInFolder(folderKey: String, activeKeys: List<String>)
@@ -143,14 +161,55 @@ interface BookDao {
         searchQuery: String,
         folderFilter: String?,
         sortOption: LibrarySortOption
+    ): Flow<List<BookEntity>> = observeLibraryBooks(
+        searchQuery = searchQuery,
+        folderFilter = folderFilter,
+        shelfId = null,
+        progressFilter = null,
+        languageFilter = null,
+        showHidden = false,
+        sortOption = sortOption
+    )
+
+    fun observeLibraryBooks(
+        searchQuery: String = "",
+        folderFilter: String? = null,
+        shelfId: Long? = null,
+        progressFilter: String? = null,
+        languageFilter: String? = null,
+        showHidden: Boolean = false,
+        sortOption: LibrarySortOption = LibrarySortOption.RECENT
     ): Flow<List<BookEntity>> {
         val args = mutableListOf<Any>()
         val whereClauses = mutableListOf<String>()
+
+        if (showHidden) {
+            whereClauses += "isHidden = 1"
+        } else {
+            whereClauses += "isHidden = 0"
+        }
 
         if (!folderFilter.isNullOrBlank()) {
             whereClauses += "folderKey = ?"
             args += folderFilter
         }
+
+        if (shelfId != null) {
+            whereClauses += "shelfId = ?"
+            args += shelfId
+        }
+
+        if (!languageFilter.isNullOrBlank()) {
+            whereClauses += "language = ?"
+            args += languageFilter
+        }
+
+        when (progressFilter) {
+            "NOT_STARTED" -> whereClauses += "progressPercent = 0.0 AND isFinished = 0"
+            "IN_PROGRESS" -> whereClauses += "progressPercent > 0.0 AND progressPercent < 0.99 AND isFinished = 0"
+            "FINISHED" -> whereClauses += "(isFinished = 1 OR progressPercent >= 0.99)"
+        }
+
         val trimmed = searchQuery.trim()
         if (trimmed.isNotEmpty()) {
             whereClauses += "(title LIKE ? OR author LIKE ?)"
@@ -165,11 +224,49 @@ interface BookDao {
             LibrarySortOption.TITLE -> "ORDER BY title COLLATE NOCASE ASC"
             LibrarySortOption.AUTHOR -> "ORDER BY author COLLATE NOCASE ASC, title COLLATE NOCASE ASC"
             LibrarySortOption.DATE_ADDED -> "ORDER BY addedAt DESC"
+            LibrarySortOption.PROGRESS_ASC -> "ORDER BY progressPercent ASC, title COLLATE NOCASE ASC"
+            LibrarySortOption.PROGRESS_DESC -> "ORDER BY progressPercent DESC, title COLLATE NOCASE ASC"
         }
 
         val sql = "SELECT * FROM books $whereSql $orderSql"
         return observeFilteredBooks(SimpleSQLiteQuery(sql, args.toTypedArray()))
     }
+}
+
+@Dao
+interface BookmarkDao {
+    @Query("SELECT * FROM bookmarks WHERE bookId = :bookId ORDER BY chapterIndex ASC, sentenceIndex ASC")
+    fun observeBookmarksForBook(bookId: Long): Flow<List<BookmarkEntity>>
+
+    @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
+    fun observeAllBookmarks(): Flow<List<BookmarkEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertBookmark(bookmark: BookmarkEntity): Long
+
+    @Query("DELETE FROM bookmarks WHERE id = :id")
+    suspend fun deleteBookmark(id: Long)
+
+    @Query("SELECT EXISTS(SELECT 1 FROM bookmarks WHERE bookId = :bookId AND chapterIndex = :chapterIndex AND type = 'BOOKMARK')")
+    suspend fun hasBookmarkForChapter(bookId: Long, chapterIndex: Int): Boolean
+
+    @Query("DELETE FROM bookmarks WHERE bookId = :bookId AND chapterIndex = :chapterIndex AND type = 'BOOKMARK'")
+    suspend fun deleteBookmarkForChapter(bookId: Long, chapterIndex: Int)
+
+    @Query("DELETE FROM bookmarks WHERE bookId = :bookId AND chapterIndex = :chapterIndex AND sentenceIndex = :sentenceIndex")
+    suspend fun deleteBookmarkBySentence(bookId: Long, chapterIndex: Int, sentenceIndex: Int)
+}
+
+@Dao
+interface ShelfDao {
+    @Query("SELECT * FROM shelves ORDER BY createdAt ASC")
+    fun observeShelves(): Flow<List<ShelfEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertShelf(shelf: ShelfEntity): Long
+
+    @Query("DELETE FROM shelves WHERE id = :id")
+    suspend fun deleteShelf(id: Long)
 }
 
 @Dao

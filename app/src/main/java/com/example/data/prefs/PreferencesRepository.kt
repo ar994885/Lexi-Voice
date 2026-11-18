@@ -17,14 +17,47 @@ import org.json.JSONObject
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "lexivoice_prefs")
 
+enum class ReaderFontFamily(val label: String) {
+    ORIGINAL("Original Book Font"),
+    SERIF("Serif"),
+    SANS_SERIF("Sans-Serif"),
+    MONOSPACE("Monospace"),
+    DYSLEXIA("Dyslexia-Friendly"),
+    CUSTOM("Custom Imported Font")
+}
+
+enum class ReaderTextAlign(val label: String) {
+    PUBLISHER("Publisher Default"),
+    LEFT("Left"),
+    JUSTIFY("Justify")
+}
+
+enum class ReaderMode(val label: String) {
+    SCROLL("Scroll"),
+    PAGED("Paged")
+}
+
 data class ReaderSettings(
     val fontSizeSp: Float = 19f,
     val lineSpacing: Float = 1.45f,
-    val themeMode: ReaderThemeMode = ReaderThemeMode.SEPIA,
+    val themeMode: ReaderThemeMode = ReaderThemeMode.WARM_SEPIA,
     val horizontalMarginDp: Int = 20,
     val useSerifFont: Boolean = true,
     val audiobookRewindSeconds: Int = 10,
-    val audiobookForwardSeconds: Int = 30
+    val audiobookForwardSeconds: Int = 30,
+    val fontFamily: ReaderFontFamily = ReaderFontFamily.ORIGINAL,
+    val usePublisherStyling: Boolean = true,
+    val paragraphSpacingEm: Float = 0.6f,
+    val textAlign: ReaderTextAlign = ReaderTextAlign.PUBLISHER,
+    val brightnessLevel: Float = -1f,
+    val readingMode: ReaderMode = ReaderMode.SCROLL,
+    val customCss: String = "",
+    val volumeKeysTurnPages: Boolean = false,
+    val showLibraryFolders: Boolean = true,
+    val customThemeBgHex: String = "#FFFDF9",
+    val customThemeTextHex: String = "#171A21",
+    val customThemeLinkHex: String = "#1D60A6",
+    val customFontName: String = ""
 )
 
 data class TtsSettings(
@@ -62,6 +95,19 @@ class PreferencesRepository(private val context: Context) {
         val READER_THEME = stringPreferencesKey("reader_theme")
         val READER_MARGIN = intPreferencesKey("reader_margin")
         val READER_SERIF = booleanPreferencesKey("reader_serif")
+        val READER_FONT_FAMILY = stringPreferencesKey("reader_font_family")
+        val READER_USE_PUBLISHER_STYLING = booleanPreferencesKey("reader_use_publisher_styling")
+        val READER_PARAGRAPH_SPACING = floatPreferencesKey("reader_paragraph_spacing")
+        val READER_TEXT_ALIGN = stringPreferencesKey("reader_text_align")
+        val READER_BRIGHTNESS = floatPreferencesKey("reader_brightness")
+        val READER_MODE = stringPreferencesKey("reader_reading_mode")
+        val READER_CUSTOM_CSS = stringPreferencesKey("reader_custom_css")
+        val VOLUME_KEYS_TURN_PAGES = booleanPreferencesKey("volume_keys_turn_pages")
+        val SHOW_LIBRARY_FOLDERS = booleanPreferencesKey("show_library_folders")
+        val CUSTOM_THEME_BG = stringPreferencesKey("custom_theme_bg")
+        val CUSTOM_THEME_TEXT = stringPreferencesKey("custom_theme_text")
+        val CUSTOM_THEME_LINK = stringPreferencesKey("custom_theme_link")
+        val CUSTOM_FONT_NAME = stringPreferencesKey("custom_font_name")
 
         val TTS_ENGINE = stringPreferencesKey("tts_engine")
         val TTS_VOICE = stringPreferencesKey("tts_voice")
@@ -70,6 +116,7 @@ class PreferencesRepository(private val context: Context) {
         val TTS_PITCH = floatPreferencesKey("tts_pitch")
 
         val LIBRARY_GRID_VIEW = booleanPreferencesKey("library_grid_view")
+        val LIBRARY_GRID_COLUMNS = intPreferencesKey("library_grid_columns")
         val SAVED_EXPORT_FOLDERS = stringPreferencesKey("saved_export_folders_json")
         val PASTE_SCRATCHPAD_TEXT = stringPreferencesKey("paste_scratchpad_text")
         val PASTE_SCRATCHPAD_TITLE = stringPreferencesKey("paste_scratchpad_title")
@@ -84,18 +131,47 @@ class PreferencesRepository(private val context: Context) {
         val AUDIOBOOK_FORWARD_SEC = intPreferencesKey("audiobook_forward_sec")
     }
 
-    val readerSettings: Flow<ReaderSettings> = context.dataStore.data.map { prefs ->
-        val themeName = prefs[Keys.READER_THEME] ?: ReaderThemeMode.SEPIA.name
-        val theme = runCatching { ReaderThemeMode.valueOf(themeName) }.getOrDefault(ReaderThemeMode.SEPIA)
-        ReaderSettings(
-            fontSizeSp = prefs[Keys.READER_FONT_SIZE] ?: 19f,
-            lineSpacing = prefs[Keys.READER_LINE_SPACING] ?: 1.45f,
+    private fun decodeReaderSettings(prefs: Preferences): ReaderSettings {
+        val theme = ReaderThemeMode.fromStoredName(prefs[Keys.READER_THEME])
+        val legacySerif = prefs[Keys.READER_SERIF] ?: true
+        val fontFamily = prefs[Keys.READER_FONT_FAMILY]?.let { raw ->
+            runCatching { ReaderFontFamily.valueOf(raw) }.getOrNull()
+        } ?: if (legacySerif) ReaderFontFamily.ORIGINAL else ReaderFontFamily.SANS_SERIF
+        val textAlign = prefs[Keys.READER_TEXT_ALIGN]?.let { raw ->
+            runCatching { ReaderTextAlign.valueOf(raw) }.getOrNull()
+        } ?: ReaderTextAlign.PUBLISHER
+        val readingMode = prefs[Keys.READER_MODE]?.let { raw ->
+            runCatching { ReaderMode.valueOf(raw) }.getOrNull()
+        } ?: ReaderMode.SCROLL
+        val rawBrightness = prefs[Keys.READER_BRIGHTNESS] ?: -1f
+        val brightness = if (rawBrightness < 0f) -1f else rawBrightness.coerceIn(0.05f, 1.0f)
+
+        return ReaderSettings(
+            fontSizeSp = (prefs[Keys.READER_FONT_SIZE] ?: 19f).coerceIn(12f, 36f),
+            lineSpacing = (prefs[Keys.READER_LINE_SPACING] ?: 1.45f).coerceIn(1.0f, 2.2f),
             themeMode = theme,
-            horizontalMarginDp = prefs[Keys.READER_MARGIN] ?: 20,
-            useSerifFont = prefs[Keys.READER_SERIF] ?: true,
+            horizontalMarginDp = (prefs[Keys.READER_MARGIN] ?: 20).coerceIn(8, 48),
+            useSerifFont = fontFamily == ReaderFontFamily.SERIF || fontFamily == ReaderFontFamily.ORIGINAL,
             audiobookRewindSeconds = (prefs[Keys.AUDIOBOOK_REWIND_SEC] ?: 10).coerceIn(1, 300),
-            audiobookForwardSeconds = (prefs[Keys.AUDIOBOOK_FORWARD_SEC] ?: 30).coerceIn(1, 300)
+            audiobookForwardSeconds = (prefs[Keys.AUDIOBOOK_FORWARD_SEC] ?: 30).coerceIn(1, 300),
+            fontFamily = fontFamily,
+            usePublisherStyling = prefs[Keys.READER_USE_PUBLISHER_STYLING] ?: true,
+            paragraphSpacingEm = (prefs[Keys.READER_PARAGRAPH_SPACING] ?: 0.6f).coerceIn(0f, 2.0f),
+            textAlign = textAlign,
+            brightnessLevel = brightness,
+            readingMode = readingMode,
+            customCss = prefs[Keys.READER_CUSTOM_CSS] ?: "",
+            volumeKeysTurnPages = prefs[Keys.VOLUME_KEYS_TURN_PAGES] ?: false,
+            showLibraryFolders = prefs[Keys.SHOW_LIBRARY_FOLDERS] ?: true,
+            customThemeBgHex = prefs[Keys.CUSTOM_THEME_BG] ?: "#FFFDF9",
+            customThemeTextHex = prefs[Keys.CUSTOM_THEME_TEXT] ?: "#171A21",
+            customThemeLinkHex = prefs[Keys.CUSTOM_THEME_LINK] ?: "#1D60A6",
+            customFontName = prefs[Keys.CUSTOM_FONT_NAME] ?: ""
         )
+    }
+
+    val readerSettings: Flow<ReaderSettings> = context.dataStore.data.map { prefs ->
+        decodeReaderSettings(prefs)
     }
 
     val ttsSettings: Flow<TtsSettings> = context.dataStore.data.map { prefs ->
@@ -109,6 +185,7 @@ class PreferencesRepository(private val context: Context) {
     }
 
     val isGridView: Flow<Boolean> = context.dataStore.data.map { it[Keys.LIBRARY_GRID_VIEW] ?: true }
+    val libraryGridColumns: Flow<Int> = context.dataStore.data.map { (it[Keys.LIBRARY_GRID_COLUMNS] ?: 3).coerceIn(2, 5) }
 
     val savedExportFolders: Flow<List<SavedExportFolder>> = context.dataStore.data.map { prefs ->
         parseSavedFolders(prefs[Keys.SAVED_EXPORT_FOLDERS].orEmpty())
@@ -132,26 +209,31 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun updateReaderSettings(transform: (ReaderSettings) -> ReaderSettings) {
         context.dataStore.edit { prefs ->
-            val currentTheme = runCatching {
-                ReaderThemeMode.valueOf(prefs[Keys.READER_THEME] ?: ReaderThemeMode.SEPIA.name)
-            }.getOrDefault(ReaderThemeMode.SEPIA)
-            val current = ReaderSettings(
-                fontSizeSp = prefs[Keys.READER_FONT_SIZE] ?: 19f,
-                lineSpacing = prefs[Keys.READER_LINE_SPACING] ?: 1.45f,
-                themeMode = currentTheme,
-                horizontalMarginDp = prefs[Keys.READER_MARGIN] ?: 20,
-                useSerifFont = prefs[Keys.READER_SERIF] ?: true,
-                audiobookRewindSeconds = (prefs[Keys.AUDIOBOOK_REWIND_SEC] ?: 10).coerceIn(1, 300),
-                audiobookForwardSeconds = (prefs[Keys.AUDIOBOOK_FORWARD_SEC] ?: 30).coerceIn(1, 300)
-            )
+            val current = decodeReaderSettings(prefs)
             val updated = transform(current)
-            prefs[Keys.READER_FONT_SIZE] = updated.fontSizeSp
-            prefs[Keys.READER_LINE_SPACING] = updated.lineSpacing
+            val rawBrightness = updated.brightnessLevel
+            val safeBrightness = if (rawBrightness < 0f) -1f else rawBrightness.coerceIn(0.05f, 1.0f)
+
+            prefs[Keys.READER_FONT_SIZE] = updated.fontSizeSp.coerceIn(12f, 36f)
+            prefs[Keys.READER_LINE_SPACING] = updated.lineSpacing.coerceIn(1.0f, 2.2f)
             prefs[Keys.READER_THEME] = updated.themeMode.name
-            prefs[Keys.READER_MARGIN] = updated.horizontalMarginDp
-            prefs[Keys.READER_SERIF] = updated.useSerifFont
+            prefs[Keys.READER_MARGIN] = updated.horizontalMarginDp.coerceIn(8, 48)
+            prefs[Keys.READER_SERIF] = updated.fontFamily == ReaderFontFamily.SERIF || updated.fontFamily == ReaderFontFamily.ORIGINAL
             prefs[Keys.AUDIOBOOK_REWIND_SEC] = updated.audiobookRewindSeconds.coerceIn(1, 300)
             prefs[Keys.AUDIOBOOK_FORWARD_SEC] = updated.audiobookForwardSeconds.coerceIn(1, 300)
+            prefs[Keys.READER_FONT_FAMILY] = updated.fontFamily.name
+            prefs[Keys.READER_USE_PUBLISHER_STYLING] = updated.usePublisherStyling
+            prefs[Keys.READER_PARAGRAPH_SPACING] = updated.paragraphSpacingEm.coerceIn(0f, 2.0f)
+            prefs[Keys.READER_TEXT_ALIGN] = updated.textAlign.name
+            prefs[Keys.READER_BRIGHTNESS] = safeBrightness
+            prefs[Keys.READER_MODE] = updated.readingMode.name
+            prefs[Keys.READER_CUSTOM_CSS] = updated.customCss
+            prefs[Keys.VOLUME_KEYS_TURN_PAGES] = updated.volumeKeysTurnPages
+            prefs[Keys.SHOW_LIBRARY_FOLDERS] = updated.showLibraryFolders
+            prefs[Keys.CUSTOM_THEME_BG] = updated.customThemeBgHex
+            prefs[Keys.CUSTOM_THEME_TEXT] = updated.customThemeTextHex
+            prefs[Keys.CUSTOM_THEME_LINK] = updated.customThemeLinkHex
+            prefs[Keys.CUSTOM_FONT_NAME] = updated.customFontName
         }
     }
 
@@ -175,6 +257,10 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun setGridView(grid: Boolean) {
         context.dataStore.edit { it[Keys.LIBRARY_GRID_VIEW] = grid }
+    }
+
+    suspend fun setGridColumns(cols: Int) {
+        context.dataStore.edit { it[Keys.LIBRARY_GRID_COLUMNS] = cols.coerceIn(2, 5) }
     }
 
     suspend fun saveScratchpad(title: String, text: String) {

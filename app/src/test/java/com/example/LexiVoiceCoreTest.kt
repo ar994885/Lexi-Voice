@@ -45,7 +45,6 @@ import java.util.zip.ZipOutputStream
 import kotlin.math.sin
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
 class LexiVoiceCoreTest {
 
     @Test
@@ -119,6 +118,32 @@ class LexiVoiceCoreTest {
         val decodedCh = SyncAlignmentSerializer.decodeChapters(chaptersJson)
         assertEquals(1, decodedCh.size)
         assertEquals("Ch 1", decodedCh[0].title)
+
+        // Test loading BookSyncMap JSON file into flat segments
+        val bsm = com.example.audiobook.BookSyncMap(
+            bookTitle = "Sync Book",
+            author = "Author",
+            chapters = listOf(
+                com.example.audiobook.SyncMapChapterEntry(
+                    chapterIndex = 0,
+                    title = "Ch 1",
+                    fileName = "001.mp3",
+                    fileUri = "/export/001.mp3",
+                    durationMs = 5000L,
+                    sentences = listOf(
+                        com.example.audiobook.SyncMapSentenceEntry(0, "BSM sent 1", 0L, 2000L),
+                        com.example.audiobook.SyncMapSentenceEntry(1, "BSM sent 2", 2000L, 5000L)
+                    )
+                )
+            )
+        )
+        val bsmFile = File(context.cacheDir, "bsm_sync.json")
+        bsmFile.writeText(SyncAlignmentSerializer.encodeBookSyncMap(bsm))
+        val bsmLoaded = SyncAlignmentSerializer.loadSegments(bsmFile)
+        assertEquals(2, bsmLoaded.size)
+        assertEquals("BSM sent 1", bsmLoaded[0].text)
+        assertEquals("BSM sent 2", bsmLoaded[1].text)
+        bsmFile.delete()
         syncFile.delete()
     }
 
@@ -726,6 +751,372 @@ class LexiVoiceCoreTest {
 
         syncFile.delete()
         db.close()
+    }
+
+    @Test
+    fun `reader theme presets migrate legacy names and expose 6 themes`() {
+        assertEquals(7, com.example.ui.theme.ReaderThemeMode.entries.size)
+        assertEquals(
+            com.example.ui.theme.ReaderThemeMode.PAPER_WHITE,
+            com.example.ui.theme.ReaderThemeMode.fromStoredName("LIGHT")
+        )
+        assertEquals(
+            com.example.ui.theme.ReaderThemeMode.WARM_SEPIA,
+            com.example.ui.theme.ReaderThemeMode.fromStoredName("SEPIA")
+        )
+        assertEquals(
+            com.example.ui.theme.ReaderThemeMode.DARK_SLATE,
+            com.example.ui.theme.ReaderThemeMode.fromStoredName("DARK")
+        )
+        assertTrue(com.example.ui.theme.ReaderThemeMode.DARK_SLATE.isDark)
+        assertTrue(com.example.ui.theme.ReaderThemeMode.AMOLED_BLACK.isDark)
+        assertTrue(!com.example.ui.theme.ReaderThemeMode.EYE_COMFORT_GREEN.isDark)
+    }
+
+    @Test
+    fun `preferences repository persists custom css paged mode and typography settings`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = com.example.data.prefs.PreferencesRepository(context)
+        repo.updateReaderSettings {
+            it.copy(
+                themeMode = com.example.ui.theme.ReaderThemeMode.AMOLED_BLACK,
+                fontSizeSp = 24f,
+                lineSpacing = 1.8f,
+                horizontalMarginDp = 32,
+                fontFamily = com.example.data.prefs.ReaderFontFamily.DYSLEXIA,
+                usePublisherStyling = false,
+                paragraphSpacingEm = 1.2f,
+                textAlign = com.example.data.prefs.ReaderTextAlign.JUSTIFY,
+                brightnessLevel = 0.65f,
+                readingMode = com.example.data.prefs.ReaderMode.PAGED,
+                customCss = "p { text-indent: 1.5em; }"
+            )
+        }
+
+        val loaded = repo.readerSettings.first()
+        assertEquals(com.example.ui.theme.ReaderThemeMode.AMOLED_BLACK, loaded.themeMode)
+        assertEquals(24f, loaded.fontSizeSp, 0.01f)
+        assertEquals(1.8f, loaded.lineSpacing, 0.01f)
+        assertEquals(32, loaded.horizontalMarginDp)
+        assertEquals(com.example.data.prefs.ReaderFontFamily.DYSLEXIA, loaded.fontFamily)
+        assertEquals(false, loaded.usePublisherStyling)
+        assertEquals(1.2f, loaded.paragraphSpacingEm, 0.01f)
+        assertEquals(com.example.data.prefs.ReaderTextAlign.JUSTIFY, loaded.textAlign)
+        assertEquals(0.65f, loaded.brightnessLevel, 0.01f)
+        assertEquals(com.example.data.prefs.ReaderMode.PAGED, loaded.readingMode)
+        assertEquals("p { text-indent: 1.5em; }", loaded.customCss)
+    }
+
+    @Test
+    fun `epub parser preserves ruby annotations tables inline styles and omits rt from tts`() {
+        val html = """
+            <html>
+              <head>
+                <link rel="stylesheet" href="styles.css"/>
+                <style>.dropcap { font-size: 2.5em; float: left; }</style>
+              </head>
+              <body>
+                <p><span class="dropcap">T</span>his reads <ruby>漢字<rt>かんじ</rt></ruby> <em>properly</em> without splitting.</p>
+                <table><tr><td>Cell One.</td></tr></table>
+              </body>
+            </html>
+        """.trimIndent()
+
+        val payload = EpubParser.buildWebChapterPayload(
+            chapterIndex = 0,
+            chapterTitle = "Test Chapter",
+            chapterHref = "OEBPS/ch1.xhtml",
+            rawHtml = html
+        )
+
+        assertTrue(payload.htmlWithSentenceSpans.contains("<ruby>"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("<rt>かんじ</rt>"))
+        assertTrue(payload.htmlWithSentenceSpans.contains(".dropcap"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("<table>"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("lexiFlipPage"))
+        assertTrue(payload.sentences.any { it.text.contains("漢字") && !it.text.contains("かんじ") })
+        assertTrue(payload.sentences.any { it.text.contains("properly") && it.text.contains("without splitting") })
+    }
+
+    @Test
+    fun `webview css generators emit publisher styling paged columns font faces and custom css`() {
+        val fontScript = com.example.ui.components.buildFontFaceInjectionScript()
+        assertTrue(fontScript.contains("LexiLiterata"))
+        assertTrue(fontScript.contains("LexiSans"))
+        assertTrue(fontScript.contains("LexiMono"))
+        assertTrue(fontScript.contains("LexiDyslexia"))
+        assertTrue(fontScript.contains("atkinson_hyperlegible.ttf"))
+
+        val pagedPublisherSettings = com.example.data.prefs.ReaderSettings(
+            themeMode = com.example.ui.theme.ReaderThemeMode.EYE_COMFORT_GREEN,
+            fontFamily = com.example.data.prefs.ReaderFontFamily.ORIGINAL,
+            usePublisherStyling = true,
+            readingMode = com.example.data.prefs.ReaderMode.PAGED,
+            horizontalMarginDp = 24
+        )
+        val pagedScript = com.example.ui.components.buildThemeInjectionScript(pagedPublisherSettings)
+        assertTrue(pagedScript.contains("column-width: calc(100vw - 48px)"))
+        assertTrue(pagedScript.contains("column-gap: 48px"))
+        assertTrue(pagedScript.contains("#DDEBD8"))
+        assertTrue(!pagedScript.contains("font-family: LexiLiterata"))
+
+        val customCssScript = com.example.ui.components.buildUserCustomCssScript("p { text-indent: 1.5em; }")
+        assertTrue(customCssScript.contains("lexi-user-css"))
+        assertTrue(customCssScript.contains("text-indent: 1.5em;"))
+    }
+
+    @Test
+    fun `epub parser searches book chapters case insensitively and returns sentence coordinates`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val epubFile = File(context.cacheDir, "search_test.epub")
+        createSampleEpub(epubFile)
+
+        val structure = EpubParser.parseBookStructure(
+            context = context,
+            fileKey = epubFile.absolutePath,
+            isDirectPath = true,
+            fallbackTitle = "Fallback"
+        )
+        val hits = EpubParser.searchBookChapters(
+            context = context,
+            fileKey = epubFile.absolutePath,
+            isDirectPath = true,
+            chapters = structure.chapters,
+            query = "recondite"
+        )
+        assertEquals(1, hits.size)
+        assertEquals(0, hits.first().chapterIndex)
+        assertTrue(hits.first().snippet.contains("recondite", ignoreCase = true))
+
+        val ch2Hits = EpubParser.searchBookChapters(
+            context = context,
+            fileKey = epubFile.absolutePath,
+            isDirectPath = true,
+            chapters = structure.chapters,
+            query = "LEVER"
+        )
+        assertEquals(1, ch2Hits.size)
+        assertEquals(1, ch2Hits.first().chapterIndex)
+
+        epubFile.delete()
+    }
+
+    @Test
+    fun `room v6 persists folders languages shelves finished hidden filters and chapter bookmark toggle`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, LexiDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val bookDao = db.bookDao()
+        val shelfDao = db.shelfDao()
+        val bookmarkDao = db.bookmarkDao()
+
+        val shelfId = shelfDao.insertShelf(com.example.data.db.ShelfEntity(name = "Sci-Fi Classics"))
+        assertTrue(shelfId > 0L)
+        assertEquals(1, shelfDao.observeShelves().first().size)
+
+        bookDao.upsertPreservingProgress(
+            listOf(
+                BookEntity(
+                    fileKey = "/Downloads/SciFi/dune.epub",
+                    folderKey = "/Downloads/SciFi",
+                    parentFolderName = "SciFi",
+                    isDirectPath = true,
+                    title = "Dune",
+                    author = "Frank Herbert",
+                    language = "en",
+                    chapterCount = 10,
+                    addedAt = 100L
+                ),
+                BookEntity(
+                    fileKey = "/Downloads/French/petit.epub",
+                    folderKey = "/Downloads/French",
+                    parentFolderName = "French",
+                    isDirectPath = true,
+                    title = "Le Petit Prince",
+                    author = "Antoine de Saint-Exupery",
+                    language = "fr",
+                    chapterCount = 5,
+                    addedAt = 200L
+                )
+            )
+        )
+
+        val dune = bookDao.getBookByFileKey("/Downloads/SciFi/dune.epub")!!
+        val petit = bookDao.getBookByFileKey("/Downloads/French/petit.epub")!!
+        assertEquals("SciFi", dune.parentFolderName)
+        assertEquals("en", dune.language)
+
+        bookDao.updateBookShelf(dune.id, shelfId)
+        bookDao.updateBookFinished(dune.id, true)
+        bookDao.updateBookHidden(petit.id, true)
+
+        val shelfBooks = bookDao.observeLibraryBooks(shelfId = shelfId).first()
+        assertEquals(1, shelfBooks.size)
+        assertEquals("Dune", shelfBooks.first().title)
+
+        val finishedBooks = bookDao.observeLibraryBooks(progressFilter = "FINISHED").first()
+        assertEquals(1, finishedBooks.size)
+        assertEquals("Dune", finishedBooks.first().title)
+
+        val hiddenBooks = bookDao.observeLibraryBooks(showHidden = true).first()
+        assertEquals(1, hiddenBooks.size)
+        assertEquals("Le Petit Prince", hiddenBooks.first().title)
+
+        val frenchBooks = bookDao.observeLibraryBooks(languageFilter = "fr", showHidden = true).first()
+        assertEquals(1, frenchBooks.size)
+
+        // Chapter bookmark toggle & highlights
+        assertEquals(false, bookmarkDao.hasBookmarkForChapter(dune.id, 2))
+        bookmarkDao.insertBookmark(
+            com.example.data.db.BookmarkEntity(
+                bookId = dune.id,
+                chapterIndex = 2,
+                sentenceIndex = 0,
+                selectedText = "Chapter 3",
+                type = "BOOKMARK"
+            )
+        )
+        bookmarkDao.insertBookmark(
+            com.example.data.db.BookmarkEntity(
+                bookId = dune.id,
+                chapterIndex = 2,
+                sentenceIndex = 4,
+                selectedText = "Fear is the mind-killer.",
+                colorHex = "#FFF59D",
+                type = "HIGHLIGHT"
+            )
+        )
+        assertEquals(true, bookmarkDao.hasBookmarkForChapter(dune.id, 2))
+        bookmarkDao.deleteBookmarkForChapter(dune.id, 2)
+        assertEquals(false, bookmarkDao.hasBookmarkForChapter(dune.id, 2))
+        val remaining = bookmarkDao.observeBookmarksForBook(dune.id).first()
+        assertEquals(1, remaining.size)
+        assertEquals("HIGHLIGHT", remaining.first().type)
+
+        db.close()
+    }
+
+    @Test
+    fun `preferences repository persists custom theme hexes volume key nav folders toggle and grid columns`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repo = com.example.data.prefs.PreferencesRepository(context)
+        repo.updateReaderSettings {
+            it.copy(
+                themeMode = com.example.ui.theme.ReaderThemeMode.CUSTOM,
+                volumeKeysTurnPages = true,
+                showLibraryFolders = false,
+                customThemeBgHex = "#102030",
+                customThemeTextHex = "#EEEEEE",
+                customThemeLinkHex = "#44AAFF",
+                customFontName = "Merriweather.ttf",
+                fontFamily = com.example.data.prefs.ReaderFontFamily.CUSTOM
+            )
+        }
+        repo.setGridColumns(4)
+
+        val loaded = repo.readerSettings.first()
+        assertEquals(com.example.ui.theme.ReaderThemeMode.CUSTOM, loaded.themeMode)
+        assertEquals(true, loaded.volumeKeysTurnPages)
+        assertEquals(false, loaded.showLibraryFolders)
+        assertEquals("#102030", loaded.customThemeBgHex)
+        assertEquals("#EEEEEE", loaded.customThemeTextHex)
+        assertEquals("#44AAFF", loaded.customThemeLinkHex)
+        assertEquals("Merriweather.ttf", loaded.customFontName)
+        assertEquals(com.example.data.prefs.ReaderFontFamily.CUSTOM, loaded.fontFamily)
+        assertEquals(4, repo.libraryGridColumns.first())
+    }
+
+    @Test
+    fun `chapter ordinals normalize offset m4b chapters while preserving epub sync indices`() {
+        // Simulate skipping 6 front-matter EPUB pages (0..5), so Chapter 1 is EPUB index 6 and Chapter 9 is EPUB index 14
+        val legacyOffsetChapters = (0 until 10).map { offsetIdx ->
+            val epubIdx = offsetIdx + 6
+            AudiobookChapterMeta(
+                index = epubIdx,
+                title = "Chapter ${offsetIdx + 1}",
+                startMs = offsetIdx * 10_000L,
+                endMs = (offsetIdx + 1) * 10_000L
+            )
+        }
+        val normalized = SyncAlignmentSerializer.normalizeChapterOrdinals(legacyOffsetChapters)
+        assertEquals(10, normalized.size)
+        assertEquals(0, normalized[0].index)
+        assertEquals("Chapter 1", normalized[0].title)
+        assertEquals(0L, normalized[0].startMs)
+        assertEquals(8, normalized[8].index)
+        assertEquals("Chapter 9", normalized[8].title)
+        assertEquals(80_000L, normalized[8].startMs)
+
+        val syncMap = BookSyncMap(
+            bookTitle = "Offset Test",
+            author = "Author",
+            chapters = (0 until 10).map { ordinal ->
+                SyncMapChapterEntry(
+                    chapterIndex = ordinal + 6,
+                    title = "Chapter ${ordinal + 1}",
+                    fileName = "%03d - Chapter %d.mp3".format(ordinal + 7, ordinal + 1),
+                    fileUri = "/export/%03d.mp3".format(ordinal + 7),
+                    durationMs = 10_000L,
+                    isDirectPath = true,
+                    sentences = listOf(
+                        SyncMapSentenceEntry(0, "Sentence in Chapter ${ordinal + 1}", 0L, 5000L)
+                    )
+                )
+            }
+        )
+        val timeline = SyncAlignmentSerializer.flattenToTimeline(syncMap)
+        // Chapter playback list uses 0-based ordinals (no +6 offset)
+        assertEquals(0, timeline.chapters[0].index)
+        assertEquals("Chapter 1", timeline.chapters[0].title)
+        assertEquals(8, timeline.chapters[8].index)
+        assertEquals("Chapter 9", timeline.chapters[8].title)
+        // Sync alignment segments preserve EPUB spine index (6..15) for Read-Along lookup
+        val hitCh1 = SyncAlignmentSerializer.findSegmentAtPosition(timeline.segments, 1000L)
+        assertEquals(6, hitCh1?.chapterIndex)
+        val hitCh9 = SyncAlignmentSerializer.findSegmentAtPosition(timeline.segments, 81_000L)
+        assertEquals(14, hitCh9?.chapterIndex)
+    }
+
+    @Test
+    fun `m4a audiobook builder handles empty inputs without throwing or leaking raw mux file`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val outM4b = File(context.cacheDir, "empty_guard_test.m4b")
+        val rawM4b = File(context.cacheDir, "empty_guard_test_raw.m4b")
+        outM4b.delete()
+        rawM4b.delete()
+
+        val wavResult = com.example.export.M4aAudiobookBuilder.buildChapteredM4bFromWavs(
+            chapters = emptyList(),
+            outputM4bFile = outM4b,
+            metadata = M4aMetadataConfig(enabled = true, title = "Empty"),
+            coverBytes = null,
+            onProgress = {}
+        )
+        assertEquals(false, wavResult.success)
+        assertEquals(0L, wavResult.totalDurationMs)
+        assertTrue(!rawM4b.exists())
+
+        val mp3Result = com.example.export.M4aAudiobookBuilder.buildChapteredM4bFromMp3Inputs(
+            context = context,
+            chapters = emptyList(),
+            outputM4bFile = outM4b,
+            metadata = M4aMetadataConfig(enabled = true, title = "Empty"),
+            coverBytes = null,
+            onProgress = {}
+        )
+        assertEquals(false, mp3Result.success)
+        assertTrue(!rawM4b.exists())
+
+        val m4aResult = com.example.export.M4aAudiobookBuilder.buildChapteredM4a(
+            chapters = emptyList(),
+            outputM4aFile = outM4b,
+            metadata = M4aMetadataConfig(enabled = true, title = "Empty"),
+            coverBytes = null,
+            onProgress = {}
+        )
+        assertEquals(false, m4aResult)
+        assertTrue(!rawM4b.exists())
     }
 
     private fun wrapAtom(type: String, payload: ByteArray): ByteArray {

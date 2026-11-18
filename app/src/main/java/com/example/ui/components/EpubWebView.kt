@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
@@ -57,14 +58,27 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
+import com.example.data.db.BookmarkEntity
+import com.example.data.prefs.ReaderFontFamily
+import com.example.data.prefs.ReaderMode
 import com.example.data.prefs.ReaderSettings
+import com.example.data.prefs.ReaderTextAlign
 import com.example.epub.EpubParser
 import com.example.ui.theme.ReaderThemeMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.FileInputStream
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
+import java.util.Locale
 import java.util.zip.ZipFile
 import kotlin.math.abs
 
@@ -102,28 +116,91 @@ private class EpubZipHolder(
 
 private class LexiBookWebView(context: Context) : WebView(context) {
     var isDestroyedOrDead: Boolean = false
+    var isPagedMode: Boolean = false
     var hasPrevChapter: Boolean = false
     var hasNextChapter: Boolean = false
     var onPullStateChanged: ((ChapterPullDirection, Float) -> Unit)? = null
     var onPullTriggered: ((ChapterPullDirection) -> Unit)? = null
     var onScrollPositionChanged: ((Int) -> Unit)? = null
+    var onFlipPageRequested: ((Int) -> Unit)? = null
+    var onCenterTapped: (() -> Unit)? = null
 
+    private var touchStartX = 0f
     private var touchStartY = 0f
+    private var isHorizontalSwipe = false
     private var activePull = ChapterPullDirection.NONE
     private var currentProgress = 0f
+    private val touchSlop by lazy { ViewConfiguration.get(context).scaledTouchSlop.toFloat() }
+    private val swipeThresholdPx by lazy { 42f * resources.displayMetrics.density }
     private val triggerThresholdPx by lazy { 150f * resources.displayMetrics.density }
 
     override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
         super.onScrollChanged(l, t, oldl, oldt)
-        if (abs(t - oldt) > 24) {
+        if (!isPagedMode && abs(t - oldt) > 24) {
             onScrollPositionChanged?.invoke(t)
         }
     }
 
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        super.onSizeChanged(w, h, ow, oh)
+        if (isPagedMode && !isDestroyedOrDead && isAttachedToWindow && (w != ow || h != oh) && w > 0 && h > 0) {
+            post {
+                if (!isDestroyedOrDead && isAttachedToWindow) {
+                    evaluateJavascript("window.lexiRecalcPagination && window.lexiRecalcPagination();", null)
+                }
+            }
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        handler?.removeCallbacksAndMessages(null)
+        super.onDetachedFromWindow()
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (isPagedMode) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    touchStartX = event.x
+                    touchStartY = event.y
+                    isHorizontalSwipe = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.x - touchStartX
+                    val dy = event.y - touchStartY
+                    if (!isHorizontalSwipe && abs(dx) > touchSlop && abs(dx) > abs(dy) * 1.15f) {
+                        isHorizontalSwipe = true
+                        val cancelEvent = MotionEvent.obtain(event).apply { action = MotionEvent.ACTION_CANCEL }
+                        super.onTouchEvent(cancelEvent)
+                        cancelEvent.recycle()
+                    }
+                    if (isHorizontalSwipe || abs(dy) > touchSlop) {
+                        return true
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (isHorizontalSwipe) {
+                        val dx = event.x - touchStartX
+                        isHorizontalSwipe = false
+                        if (dx < -swipeThresholdPx) {
+                            onFlipPageRequested?.invoke(1)
+                        } else if (dx > swipeThresholdPx) {
+                            onFlipPageRequested?.invoke(-1)
+                        }
+                        return true
+                    }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    isHorizontalSwipe = false
+                }
+            }
+            return super.onTouchEvent(event)
+        }
+
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                touchStartX = event.x
                 touchStartY = event.y
                 activePull = ChapterPullDirection.NONE
                 currentProgress = 0f
@@ -135,7 +212,7 @@ private class LexiBookWebView(context: Context) : WebView(context) {
                 val atBottom = scrollY >= (maxScrollY - 4).coerceAtLeast(0)
 
                 if (activePull == ChapterPullDirection.NONE) {
-                    if (atBottom && dy < -24f && hasNextChapter) {
+                    if (atBottom && dy < -24f) {
                         activePull = ChapterPullDirection.NEXT
                     } else if (atTop && dy > 24f && hasPrevChapter) {
                         activePull = ChapterPullDirection.PREV
@@ -159,39 +236,98 @@ private class LexiBookWebView(context: Context) : WebView(context) {
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                val firedDir = if (event.actionMasked == MotionEvent.ACTION_UP && currentProgress >= 1.0f) {
-                    activePull
-                } else {
-                    ChapterPullDirection.NONE
-                }
-                activePull = ChapterPullDirection.NONE
-                currentProgress = 0f
-                onPullStateChanged?.invoke(ChapterPullDirection.NONE, 0f)
-                if (firedDir != ChapterPullDirection.NONE) {
-                    onPullTriggered?.invoke(firedDir)
-                    return true
-                }
-            }
-        }
-        return super.onTouchEvent(event)
+val firedDir = if (event.actionMasked == MotionEvent.ACTION_UP && currentProgress >= 1.0f) {
+activePull
+} else {
+ChapterPullDirection.NONE
+}
+activePull = ChapterPullDirection.NONE
+currentProgress = 0f
+onPullStateChanged?.invoke(ChapterPullDirection.NONE, 0f)
+if (firedDir != ChapterPullDirection.NONE) {
+onPullTriggered?.invoke(firedDir)
+return true
+}
+}
+}
+return super.onTouchEvent(event)
+}
+}
+private fun destroyWebViewSafely(wv: LexiBookWebView) {
+    wv.onPullStateChanged = null
+    wv.onPullTriggered = null
+    wv.onScrollPositionChanged = null
+    wv.onFlipPageRequested = null
+    wv.onCenterTapped = null
+    if (wv.isDestroyedOrDead) {
+        runCatching { (wv.parent as? ViewGroup)?.removeView(wv) }
+        return
+    }
+    wv.isDestroyedOrDead = true
+    runCatching {
+        wv.handler?.removeCallbacksAndMessages(null)
+        wv.stopLoading()
+        wv.onPause()
+        wv.removeJavascriptInterface("LexiBridge")
+        wv.webViewClient = WebViewClient()
+        wv.webChromeClient = null
+        wv.clearHistory()
+        wv.removeAllViews()
+        (wv.parent as? ViewGroup)?.removeView(wv)
+        wv.destroy()
     }
 }
 
 private class LexiWebJsBridge(
+    private val isAliveProvider: () -> Boolean,
+    private val enableSentenceTapProvider: () -> Boolean,
     private val onSentenceTappedCallback: (Int) -> Unit,
-    private val onTextSelectedCallback: (String) -> Unit
+    private val onTextSelectedCallback: (String, Int) -> Unit,
+    private val onPageStateChangedCallback: (Int, Int) -> Unit,
+    private val onPageBoundaryReachedCallback: (Int) -> Unit,
+    private val onCenterTappedCallback: () -> Unit,
+    private val onExternalLinkClickedCallback: (String) -> Unit
 ) {
     @JavascriptInterface
     fun onSentenceTapped(idx: Int) {
-        onSentenceTappedCallback(idx)
+        if (!isAliveProvider()) return
+        if (enableSentenceTapProvider()) {
+            onSentenceTappedCallback(idx)
+        } else {
+            onCenterTappedCallback()
+        }
     }
-
     @JavascriptInterface
     fun onTextSelected(text: String) {
-        onTextSelectedCallback(text)
+        if (!isAliveProvider()) return
+        onTextSelectedCallback(text, -1)
+    }
+    @JavascriptInterface
+    fun onTextSelectedWithSentence(text: String, sentenceIndex: Int) {
+        if (!isAliveProvider()) return
+        onTextSelectedCallback(text, sentenceIndex)
+    }
+    @JavascriptInterface
+    fun onPageStateChanged(currentPage: Int, totalPages: Int) {
+        if (!isAliveProvider()) return
+        onPageStateChangedCallback(currentPage, totalPages)
+    }
+    @JavascriptInterface
+    fun onPageBoundaryReached(direction: Int) {
+        if (!isAliveProvider()) return
+        onPageBoundaryReachedCallback(direction)
+    }
+    @JavascriptInterface
+    fun onCenterTapped() {
+        if (!isAliveProvider()) return
+        onCenterTappedCallback()
+    }
+    @JavascriptInterface
+    fun onExternalLinkClicked(url: String) {
+        if (!isAliveProvider()) return
+        onExternalLinkClickedCallback(url)
     }
 }
-
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun EpubWebView(
@@ -202,15 +338,28 @@ fun EpubWebView(
     activeSentenceIndex: Int,
     hasPrevChapter: Boolean,
     hasNextChapter: Boolean,
-    onSentenceTapped: (Int) -> Unit,
+    chapterHighlights: List<BookmarkEntity> = emptyList(),
+    enableSentenceTap: Boolean = false,
+    onSentenceTapped: (Int) -> Unit = {},
     onPullPrevChapter: () -> Unit,
     onPullNextChapter: () -> Unit,
+    onEndOfBookReached: () -> Unit = {},
     onScrollChanged: (Int) -> Unit = {},
-    onTextSelected: (String) -> Unit = {},
+    onTextSelectedWithSentence: (String, Int) -> Unit = { _, _ -> },
+    initialPageOnLoad: Int = 0,
+    targetPageTrigger: Pair<Int, Long>? = null,
+    pageFlipTrigger: Pair<Int, Long>? = null,
+    forceScrollMode: Boolean = false,
+    onPageStateChanged: (currentPage: Int, totalPages: Int) -> Unit = { _, _ -> },
+    onCenterTapped: () -> Unit = {},
+    onExternalLinkClicked: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isLifecycleResumed by remember(lifecycleOwner) {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
     var zipHolder by remember(fileKey, isDirectPath) { mutableStateOf<EpubZipHolder?>(null) }
     var zipOpenCompleted by remember(fileKey, isDirectPath) { mutableStateOf(fileKey.isBlank()) }
     var webViewRef by remember { mutableStateOf<LexiBookWebView?>(null) }
@@ -218,364 +367,550 @@ fun EpubWebView(
     var pageLoadedKey by remember { mutableStateOf("") }
     var renderGeneration by remember { mutableIntStateOf(0) }
     var consecutiveRendererFailures by remember { mutableIntStateOf(0) }
-
     var pullDir by remember { mutableStateOf(ChapterPullDirection.NONE) }
     var pullProgress by remember { mutableFloatStateOf(0f) }
-
+    val effectivePagedMode = !forceScrollMode && readerSettings.readingMode == ReaderMode.PAGED
+    val latestEnableSentenceTap by rememberUpdatedState(enableSentenceTap)
     val latestOnSentenceTapped by rememberUpdatedState(onSentenceTapped)
     val latestOnPullPrev by rememberUpdatedState(onPullPrevChapter)
     val latestOnPullNext by rememberUpdatedState(onPullNextChapter)
+    val latestOnEndOfBook by rememberUpdatedState(onEndOfBookReached)
     val latestOnScroll by rememberUpdatedState(onScrollChanged)
-    val latestOnTextSelected by rememberUpdatedState(onTextSelected)
+    val latestOnTextSelected by rememberUpdatedState(onTextSelectedWithSentence)
+    val latestOnPageStateChanged by rememberUpdatedState(onPageStateChanged)
+    val latestOnCenterTapped by rememberUpdatedState(onCenterTapped)
+    val latestOnExternalLink by rememberUpdatedState(onExternalLinkClicked)
     val latestSettings by rememberUpdatedState(readerSettings)
+    val latestForceScroll by rememberUpdatedState(forceScrollMode)
     val latestActiveSentence by rememberUpdatedState(activeSentenceIndex)
+    val latestInitialPage by rememberUpdatedState(initialPageOnLoad)
+    val latestHasPrevChapter by rememberUpdatedState(hasPrevChapter)
+    val latestHasNextChapter by rememberUpdatedState(hasNextChapter)
     val latestZipHolder by rememberUpdatedState(zipHolder)
-
-    LaunchedEffect(fileKey, isDirectPath) {
-        zipOpenCompleted = false
-        val previous = zipHolder
-        zipHolder = null
-        previous?.close()
-
-        if (fileKey.isNotBlank()) {
-            val opened = withContext(Dispatchers.IO) {
-                EpubParser.openReadableZip(context, fileKey, isDirectPath)
-            }
-            zipHolder = opened?.let { (zip, temp) -> EpubZipHolder(zip, temp) }
-        }
-        zipOpenCompleted = true
-    }
-
-    DisposableEffect(fileKey, isDirectPath) {
-        onDispose {
-            zipHolder?.close()
-            zipHolder = null
-        }
-    }
-
-    val contentKey = remember(fileKey, chapterPayload.chapterIndex, chapterPayload.htmlWithSentenceSpans.length, renderGeneration) {
-        "$fileKey#${chapterPayload.chapterIndex}#${chapterPayload.htmlWithSentenceSpans.length}#$renderGeneration"
-    }
-
-    // Apply live theme/typography CSS updates without full page reload
-    LaunchedEffect(readerSettings, pageLoadedKey) {
-        val wv = webViewRef ?: return@LaunchedEffect
-        if (pageLoadedKey.isNotBlank()) {
-            runCatching { wv.evaluateJavascript(buildThemeInjectionScript(readerSettings), null) }
-        }
-    }
-
-    // Highlight and smooth-scroll to active sentence
-    LaunchedEffect(activeSentenceIndex, pageLoadedKey) {
-        val wv = webViewRef ?: return@LaunchedEffect
-        if (pageLoadedKey == contentKey) {
-            runCatching {
-                wv.evaluateJavascript("window.lexiHighlightSentence && window.lexiHighlightSentence($activeSentenceIndex, true);", null)
-            }
-        }
-    }
-
-    Box(modifier = modifier.fillMaxSize()) {
-        if (consecutiveRendererFailures > 3) {
-            // Safe native fallback if Android WebView renderer crashes repeatedly
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(readerSettings.themeMode.background)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = readerSettings.horizontalMarginDp.dp, vertical = 20.dp)
-            ) {
-                Button(
-                    onClick = {
-                        consecutiveRendererFailures = 0
-                        lastLoadedKey = ""
-                        pageLoadedKey = ""
-                        renderGeneration++
-                    }
-                ) {
-                    Text("Reload Rich Chapter View")
-                }
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    text = chapterPayload.plainText.ifBlank { "Unable to render chapter." },
-                    color = readerSettings.themeMode.text,
-                    fontSize = readerSettings.fontSizeSp.sp,
-                    lineHeight = (readerSettings.fontSizeSp * readerSettings.lineSpacing).sp
-                )
-            }
+    val latestHighlights by rememberUpdatedState(chapterHighlights)
+    val effectiveBgColor = remember(readerSettings.themeMode, readerSettings.customThemeBgHex) {
+        if (readerSettings.themeMode == ReaderThemeMode.CUSTOM) {
+            runCatching { Color(android.graphics.Color.parseColor(readerSettings.customThemeBgHex)) }
+                .getOrDefault(readerSettings.themeMode.background)
         } else {
-            key(renderGeneration) {
-                AndroidView(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("epub_webview"),
-                    factory = { ctx ->
-                        LexiBookWebView(ctx).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            setBackgroundColor(latestSettings.themeMode.background.toArgb())
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-                            }
-                            settings.apply {
-                                javaScriptEnabled = true
-                                domStorageEnabled = false
-                                cacheMode = WebSettings.LOAD_NO_CACHE
-                                builtInZoomControls = true
-                                displayZoomControls = false
-                                useWideViewPort = false
-                                loadWithOverviewMode = false
-                                allowFileAccess = false
-                                allowContentAccess = false
-                                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                            }
-                            addJavascriptInterface(
-                                LexiWebJsBridge(
-                                    onSentenceTappedCallback = { idx ->
-                                        post { latestOnSentenceTapped(idx) }
-                                    },
-                                    onTextSelectedCallback = { txt ->
-                                        post { latestOnTextSelected(txt) }
-                                    }
-                                ),
-                                "LexiBridge"
-                            )
-                            onPullStateChanged = { dir, prog ->
-                                pullDir = dir
-                                pullProgress = prog
-                            }
-                            onPullTriggered = { dir ->
-                                when (dir) {
-                                    ChapterPullDirection.NEXT -> latestOnPullNext()
-                                    ChapterPullDirection.PREV -> latestOnPullPrev()
-                                    ChapterPullDirection.NONE -> Unit
-                                }
-                            }
-                            onScrollPositionChanged = { y ->
-                                latestOnScroll(y)
-                            }
-                            webViewClient = object : WebViewClient() {
-                                override fun shouldInterceptRequest(
-                                    view: WebView?,
-                                    request: WebResourceRequest?
-                                ): WebResourceResponse? {
-                                    val url = request?.url?.toString() ?: return null
-                                    return runCatching {
-                                        val corsHeaders = mapOf("Access-Control-Allow-Origin" to "*")
-                                        if (url.startsWith("${EpubParser.ASSET_BASE_URL}__lexi_fonts/")) {
-                                            val resId = when {
-                                                url.endsWith("literata.ttf") -> R.font.literata
-                                                url.endsWith("plus_jakarta_sans.ttf") -> R.font.plus_jakarta_sans
-                                                else -> null
-                                            }
-                                            if (resId != null) {
-                                                val stream = ctx.resources.openRawResource(resId)
-                                                return@runCatching WebResourceResponse(
-                                                    "font/ttf",
-                                                    null,
-                                                    200,
-                                                    "OK",
-                                                    corsHeaders,
-                                                    stream
-                                                )
-                                            }
-                                        }
-                                        val holder = latestZipHolder
-                                        val data = holder?.readResource(url)
-                                        if (data != null) {
-                                            return@runCatching WebResourceResponse(
-                                                data.mimeType,
-                                                "UTF-8",
-                                                200,
-                                                "OK",
-                                                corsHeaders,
-                                                ByteArrayInputStream(data.bytes)
-                                            )
-                                        }
-                                        if (url.startsWith(EpubParser.ASSET_BASE_URL) ||
-                                            url.startsWith("http://") ||
-                                            url.startsWith("https://")
-                                        ) {
-                                            return@runCatching WebResourceResponse(
-                                                "text/plain",
-                                                "UTF-8",
-                                                404,
-                                                "Not Found",
-                                                corsHeaders,
-                                                ByteArrayInputStream(ByteArray(0))
-                                            )
-                                        }
-                                        null
-                                    }.getOrNull()
-                                }
-
-                                override fun onPageFinished(view: WebView?, url: String?) {
-                                    super.onPageFinished(view, url)
-                                    consecutiveRendererFailures = 0
-                                    pageLoadedKey = lastLoadedKey
-                                    view?.evaluateJavascript(buildFontFaceInjectionScript(), null)
-                                    view?.evaluateJavascript(buildThemeInjectionScript(latestSettings), null)
-                                    val activeIdx = latestActiveSentence
-                                    if (activeIdx >= 0) {
-                                        view?.evaluateJavascript(
-                                            "window.lexiHighlightSentence && window.lexiHighlightSentence($activeIdx, true);",
-                                            null
-                                        )
-                                    }
-                                }
-
-                                override fun onRenderProcessGone(
-                                    view: WebView?,
-                                    detail: RenderProcessGoneDetail?
-                                ): Boolean {
-                                    Log.w(
-                                        "EpubWebView",
-                                        "WebView renderer terminated (didCrash=${detail?.didCrash()}); recovering cleanly."
-                                    )
-                                    view?.let { dead ->
-                                        (dead as? LexiBookWebView)?.isDestroyedOrDead = true
-                                        runCatching {
-                                            dead.stopLoading()
-                                            dead.removeJavascriptInterface("LexiBridge")
-                                            (dead.parent as? ViewGroup)?.removeView(dead)
-                                            dead.destroy()
-                                        }
-                                        if (webViewRef === dead) {
-                                            webViewRef = null
-                                        }
-                                    }
-                                    lastLoadedKey = ""
-                                    pageLoadedKey = ""
-                                    consecutiveRendererFailures++
-                                    if (consecutiveRendererFailures <= 3) {
-                                        renderGeneration++
-                                    }
-                                    return true
-                                }
-                            }
-                            webViewRef = this
-                        }
-                    },
-                    update = { wv ->
-                        wv.hasPrevChapter = hasPrevChapter
-                        wv.hasNextChapter = hasNextChapter
-                        wv.setBackgroundColor(readerSettings.themeMode.background.toArgb())
-                        if (zipOpenCompleted && lastLoadedKey != contentKey && !wv.isDestroyedOrDead) {
-                            lastLoadedKey = contentKey
-                            pageLoadedKey = ""
-                            wv.scrollTo(0, 0)
-                            wv.loadDataWithBaseURL(
-                                chapterPayload.baseUrl,
-                                chapterPayload.htmlWithSentenceSpans,
-                                "text/html",
-                                "UTF-8",
-                                null
-                            )
-                        }
-                    },
-                    onRelease = { wv ->
-                        wv.onPullStateChanged = null
-                        wv.onPullTriggered = null
-                        wv.onScrollPositionChanged = null
-                        if (!wv.isDestroyedOrDead) {
-                            wv.isDestroyedOrDead = true
-                            runCatching {
-                                wv.stopLoading()
-                                wv.removeJavascriptInterface("LexiBridge")
-                                wv.clearHistory()
-                                wv.loadUrl("about:blank")
-                                wv.removeAllViews()
-                                wv.destroy()
-                            }
-                        }
-                        if (webViewRef === wv) {
-                            webViewRef = null
-                        }
-                    }
-                )
-            }
-        }
-
-        // Top Pull-Down Indicator (Previous Chapter)
-        AnimatedVisibility(
-            visible = pullDir == ChapterPullDirection.PREV,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 12.dp)
-        ) {
-            val ready = pullProgress >= 1.0f
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                shadowElevation = 6.dp
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowDownward,
-                        contentDescription = null,
-                        tint = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = if (ready) "Release for Previous Chapter" else "Pull down for Previous Chapter",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-
-        // Bottom Pull-Up Indicator (Next Chapter)
-        AnimatedVisibility(
-            visible = pullDir == ChapterPullDirection.NEXT,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 14.dp)
-        ) {
-            val ready = pullProgress >= 1.0f
-            Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                shadowElevation = 6.dp
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowUpward,
-                        contentDescription = null,
-                        tint = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = if (ready) "Release to load Next Chapter" else "Pull up to load Next Chapter",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            readerSettings.themeMode.background
         }
     }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    isLifecycleResumed = true
+                    webViewRef?.let { wv ->
+                        if (!wv.isDestroyedOrDead) {
+                            runCatching {
+                                wv.onResume()
+                                wv.resumeTimers()
+                            }
+                        }
+                    }
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    isLifecycleResumed = false
+                    webViewRef?.let { wv ->
+                        if (!wv.isDestroyedOrDead) {
+                            runCatching {
+                                wv.onPause()
+                                wv.pauseTimers()
+                            }
+                        }
+                    }
+                }
+                Lifecycle.Event.ON_DESTROY -> {
+                    isLifecycleResumed = false
+                    webViewRef?.let { wv ->
+                        destroyWebViewSafely(wv)
+                        webViewRef = null
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+LaunchedEffect(fileKey, isDirectPath) {
+zipOpenCompleted = false
+val previous = zipHolder
+zipHolder = null
+previous?.close()
+if (fileKey.isNotBlank()) {
+val opened = withContext(Dispatchers.IO) {
+EpubParser.openReadableZip(context, fileKey, isDirectPath)
 }
-
+zipHolder = opened?.let { (zip, temp) -> EpubZipHolder(zip, temp) }
+}
+zipOpenCompleted = true
+}
+DisposableEffect(fileKey, isDirectPath) {
+onDispose {
+zipHolder?.close()
+zipHolder = null
+}
+}
+val contentKey = remember(fileKey, chapterPayload.chapterIndex, chapterPayload.htmlWithSentenceSpans.length, renderGeneration) {
+"$fileKey#${chapterPayload.chapterIndex}#${chapterPayload.htmlWithSentenceSpans.length}#$renderGeneration"
+}
+LaunchedEffect(readerSettings, forceScrollMode, pageLoadedKey, isLifecycleResumed) {
+val wv = webViewRef ?: return@LaunchedEffect
+if (isLifecycleResumed && pageLoadedKey.isNotBlank() && !wv.isDestroyedOrDead) {
+runCatching {
+wv.evaluateJavascript(buildFontFaceInjectionScript(readerSettings.customFontName), null)
+wv.evaluateJavascript(buildThemeInjectionScript(readerSettings, forceScrollMode), null)
+wv.evaluateJavascript(buildUserCustomCssScript(readerSettings.customCss), null)
+val pagedFlag = if (!forceScrollMode && readerSettings.readingMode == ReaderMode.PAGED) "true" else "false"
+wv.evaluateJavascript("window.__lexiPagedMode = $pagedFlag; window.lexiRecalcPagination && window.lexiRecalcPagination();", null)
+}
+}
+}
+LaunchedEffect(chapterHighlights, pageLoadedKey, isLifecycleResumed) {
+val wv = webViewRef ?: return@LaunchedEffect
+if (isLifecycleResumed && pageLoadedKey == contentKey && !wv.isDestroyedOrDead) {
+runCatching {
+wv.evaluateJavascript(buildHighlightsInjectionScript(chapterHighlights), null)
+}
+}
+}
+LaunchedEffect(activeSentenceIndex, pageLoadedKey, isLifecycleResumed) {
+val wv = webViewRef ?: return@LaunchedEffect
+if (isLifecycleResumed && pageLoadedKey == contentKey && !wv.isDestroyedOrDead) {
+val isActive = if (activeSentenceIndex >= 0) "true" else "false"
+runCatching {
+wv.evaluateJavascript(
+"window.__lexiTtsActive = $isActive; window.lexiHighlightSentence && window.lexiHighlightSentence($activeSentenceIndex, true);",
+null
+)
+}
+}
+}
+LaunchedEffect(targetPageTrigger, pageLoadedKey, isLifecycleResumed) {
+val trigger = targetPageTrigger ?: return@LaunchedEffect
+val wv = webViewRef ?: return@LaunchedEffect
+if (isLifecycleResumed && pageLoadedKey == contentKey && effectivePagedMode && !wv.isDestroyedOrDead) {
+runCatching {
+wv.evaluateJavascript("window.lexiGoToPage && window.lexiGoToPage(${trigger.first}, false);", null)
+}
+}
+}
+LaunchedEffect(pageFlipTrigger, pageLoadedKey, isLifecycleResumed) {
+val trigger = pageFlipTrigger ?: return@LaunchedEffect
+val wv = webViewRef ?: return@LaunchedEffect
+if (isLifecycleResumed && pageLoadedKey == contentKey && !wv.isDestroyedOrDead) {
+runCatching {
+if (effectivePagedMode) {
+wv.evaluateJavascript("window.lexiFlipPage && window.lexiFlipPage(${trigger.first});", null)
+} else {
+val scrollDelta = (wv.height * 0.85f).toInt() * trigger.first
+wv.evaluateJavascript("window.scrollBy({top: $scrollDelta, behavior: 'smooth'});", null)
+}
+}
+}
+}
+Box(modifier = modifier.fillMaxSize()) {
+if (consecutiveRendererFailures > 3) {
+Column(
+modifier = Modifier
+.fillMaxSize()
+.background(effectiveBgColor)
+.verticalScroll(rememberScrollState())
+.padding(horizontal = readerSettings.horizontalMarginDp.dp, vertical = 20.dp)
+) {
+Button(
+onClick = {
+consecutiveRendererFailures = 0
+lastLoadedKey = ""
+pageLoadedKey = ""
+renderGeneration++
+}
+) {
+Text("Reload Rich Chapter View")
+}
+Spacer(Modifier.height(16.dp))
+Text(
+text = chapterPayload.plainText.ifBlank { "Unable to render chapter." },
+color = readerSettings.themeMode.text,
+fontSize = readerSettings.fontSizeSp.sp,
+lineHeight = (readerSettings.fontSizeSp * readerSettings.lineSpacing).sp
+)
+}
+} else {
+key(renderGeneration) {
+AndroidView(
+modifier = Modifier
+.fillMaxSize()
+.testTag("epub_webview"),
+factory = { ctx ->
+LexiBookWebView(ctx).apply {
+layoutParams = ViewGroup.LayoutParams(
+ViewGroup.LayoutParams.MATCH_PARENT,
+ViewGroup.LayoutParams.MATCH_PARENT
+)
+setBackgroundColor(effectiveBgColor.toArgb())
+isHorizontalScrollBarEnabled = false
+if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+}
+onResume()
+resumeTimers()
+settings.apply {
+javaScriptEnabled = true
+domStorageEnabled = false
+cacheMode = WebSettings.LOAD_NO_CACHE
+builtInZoomControls = true
+displayZoomControls = false
+useWideViewPort = false
+loadWithOverviewMode = false
+allowFileAccess = false
+allowContentAccess = false
+mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+}
+addJavascriptInterface(
+LexiWebJsBridge(
+isAliveProvider = { !this@apply.isDestroyedOrDead },
+enableSentenceTapProvider = { latestEnableSentenceTap },
+onSentenceTappedCallback = { idx ->
+post { if (!this@apply.isDestroyedOrDead) latestOnSentenceTapped(idx) }
+},
+onTextSelectedCallback = { txt, sentIdx ->
+post { if (!this@apply.isDestroyedOrDead) latestOnTextSelected(txt, sentIdx) }
+},
+onPageStateChangedCallback = { curPage, totalPages ->
+post { if (!this@apply.isDestroyedOrDead) latestOnPageStateChanged(curPage, totalPages) }
+},
+onPageBoundaryReachedCallback = { dir ->
+post {
+if (this@apply.isDestroyedOrDead) return@post
+if (dir < 0 && latestHasPrevChapter) {
+latestOnPullPrev()
+} else if (dir > 0) {
+if (latestHasNextChapter) {
+latestOnPullNext()
+} else {
+latestOnEndOfBook()
+}
+}
+}
+},
+onCenterTappedCallback = {
+post { if (!this@apply.isDestroyedOrDead) latestOnCenterTapped() }
+},
+onExternalLinkClickedCallback = { url ->
+post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
+}
+),
+"LexiBridge"
+)
+onPullStateChanged = { dir, prog ->
+pullDir = dir
+pullProgress = prog
+}
+onPullTriggered = { dir ->
+when (dir) {
+ChapterPullDirection.NEXT -> if (latestHasNextChapter) latestOnPullNext() else latestOnEndOfBook()
+ChapterPullDirection.PREV -> latestOnPullPrev()
+ChapterPullDirection.NONE -> Unit
+}
+}
+onScrollPositionChanged = { y ->
+latestOnScroll(y)
+}
+onFlipPageRequested = { delta ->
+if (!isDestroyedOrDead) {
+evaluateJavascript("window.lexiFlipPage && window.lexiFlipPage($delta);", null)
+}
+}
+this.onCenterTapped = {
+latestOnCenterTapped()
+}
+webViewClient = object : WebViewClient() {
+override fun shouldOverrideUrlLoading(
+view: WebView?,
+request: WebResourceRequest?
+): Boolean {
+if ((view as? LexiBookWebView)?.isDestroyedOrDead == true) return true
+val url = request?.url?.toString().orEmpty()
+if ((url.startsWith("http://") || url.startsWith("https://")) && !url.startsWith(EpubParser.ASSET_BASE_URL)) {
+post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
+return true
+}
+return false
+}
+override fun shouldInterceptRequest(
+view: WebView?,
+request: WebResourceRequest?
+): WebResourceResponse? {
+if ((view as? LexiBookWebView)?.isDestroyedOrDead == true) return null
+val url = request?.url?.toString() ?: return null
+return runCatching {
+val corsHeaders = mapOf("Access-Control-Allow-Origin" to "*")
+if (url.startsWith("${EpubParser.ASSET_BASE_URL}__lexi_fonts/")) {
+val fileName = url.removePrefix("${EpubParser.ASSET_BASE_URL}__lexi_fonts/")
+val resId = when (fileName) {
+"literata.ttf" -> R.font.literata
+"plus_jakarta_sans.ttf" -> R.font.plus_jakarta_sans
+"jetbrains_mono.ttf" -> R.font.jetbrains_mono
+"atkinson_hyperlegible.ttf" -> R.font.atkinson_hyperlegible
+else -> null
+}
+if (resId != null) {
+val stream = ctx.resources.openRawResource(resId)
+return@runCatching WebResourceResponse(
+"font/ttf",
+null,
+200,
+"OK",
+corsHeaders,
+stream
+)
+}
+if (fileName.startsWith("custom/")) {
+val decoded = URLDecoder.decode(
+fileName.removePrefix("custom/"),
+StandardCharsets.UTF_8.name()
+)
+val fontDir = File(ctx.filesDir, "custom_fonts")
+val target = fontDir.listFiles()?.firstOrNull {
+it.name == decoded || it.nameWithoutExtension == decoded
+}
+if (target != null && target.exists()) {
+val mime = if (target.extension.equals("otf", true)) "font/otf" else "font/ttf"
+return@runCatching WebResourceResponse(
+mime,
+null,
+200,
+"OK",
+corsHeaders,
+FileInputStream(target)
+)
+}
+}
+}
+val holder = latestZipHolder
+val data = holder?.readResource(url)
+if (data != null) {
+return@runCatching WebResourceResponse(
+data.mimeType,
+"UTF-8",
+200,
+"OK",
+corsHeaders,
+ByteArrayInputStream(data.bytes)
+)
+}
+if (url.startsWith(EpubParser.ASSET_BASE_URL) ||
+url.startsWith("http://") ||
+url.startsWith("https://")
+) {
+return@runCatching WebResourceResponse(
+"text/plain",
+"UTF-8",
+404,
+"Not Found",
+corsHeaders,
+ByteArrayInputStream(ByteArray(0))
+)
+}
+null
+}.getOrNull()
+}
+override fun onPageFinished(view: WebView?, url: String?) {
+super.onPageFinished(view, url)
+if ((view as? LexiBookWebView)?.isDestroyedOrDead == true) return
+consecutiveRendererFailures = 0
+pageLoadedKey = lastLoadedKey
+val settingsNow = latestSettings
+val isPagedNow = !latestForceScroll && settingsNow.readingMode == ReaderMode.PAGED
+view?.evaluateJavascript(buildFontFaceInjectionScript(settingsNow.customFontName), null)
+view?.evaluateJavascript(buildThemeInjectionScript(settingsNow, latestForceScroll), null)
+view?.evaluateJavascript(buildUserCustomCssScript(settingsNow.customCss), null)
+view?.evaluateJavascript(buildHighlightsInjectionScript(latestHighlights), null)
+val initPage = latestInitialPage
+val activeIdx = latestActiveSentence
+view?.evaluateJavascript(
+"""
+(function(){
+window.__lexiPagedMode = ${if (isPagedNow) "true" else "false"};
+if (window.lexiRecalcPagination) {
+window.lexiRecalcPagination($initPage);
+}
+${if (activeIdx >= 0) "setTimeout(function(){ window.lexiHighlightSentence && window.lexiHighlightSentence($activeIdx, true); }, 60);" else ""}
+})();
+""".trimIndent(),
+null
+)
+}
+override fun onRenderProcessGone(
+view: WebView?,
+detail: RenderProcessGoneDetail?
+): Boolean {
+Log.w(
+"EpubWebView",
+"WebView renderer terminated (didCrash=${detail?.didCrash()}); recovering cleanly."
+)
+val dead = view as? LexiBookWebView
+if (dead != null) {
+destroyWebViewSafely(dead)
+if (webViewRef === dead) {
+webViewRef = null
+}
+} else {
+view?.let { v ->
+runCatching {
+v.stopLoading()
+(v.parent as? ViewGroup)?.removeView(v)
+v.destroy()
+}
+}
+}
+lastLoadedKey = ""
+pageLoadedKey = ""
+consecutiveRendererFailures++
+if (consecutiveRendererFailures <= 3) {
+renderGeneration++
+}
+return true
+}
+}
+webViewRef = this
+}
+},
+update = { wv ->
+wv.hasPrevChapter = hasPrevChapter
+wv.hasNextChapter = hasNextChapter
+wv.isPagedMode = effectivePagedMode
+wv.setBackgroundColor(effectiveBgColor.toArgb())
+if (zipOpenCompleted && lastLoadedKey != contentKey && !wv.isDestroyedOrDead) {
+lastLoadedKey = contentKey
+pageLoadedKey = ""
+wv.scrollTo(0, 0)
+wv.loadDataWithBaseURL(
+chapterPayload.baseUrl,
+chapterPayload.htmlWithSentenceSpans,
+"text/html",
+"UTF-8",
+null
+)
+}
+},
+onRelease = { wv ->
+destroyWebViewSafely(wv)
+if (webViewRef === wv) {
+webViewRef = null
+}
+}
+)
+}
+}
+AnimatedVisibility(
+visible = !effectivePagedMode && pullDir == ChapterPullDirection.PREV,
+enter = fadeIn(),
+exit = fadeOut(),
+modifier = Modifier
+.align(Alignment.TopCenter)
+.padding(top = 12.dp)
+) {
+val ready = pullProgress >= 1.0f
+Surface(
+shape = RoundedCornerShape(24.dp),
+color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+shadowElevation = 6.dp
+) {
+Row(
+modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+verticalAlignment = Alignment.CenterVertically,
+horizontalArrangement = Arrangement.Center
+) {
+Icon(
+imageVector = Icons.Default.ArrowDownward,
+contentDescription = null,
+tint = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+)
+Spacer(Modifier.width(8.dp))
+Text(
+text = if (ready) "Release for Previous Chapter" else "Pull down for Previous Chapter",
+style = MaterialTheme.typography.labelLarge,
+color = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+)
+}
+}
+}
+AnimatedVisibility(
+visible = !effectivePagedMode && pullDir == ChapterPullDirection.NEXT,
+enter = fadeIn(),
+exit = fadeOut(),
+modifier = Modifier
+.align(Alignment.BottomCenter)
+.padding(bottom = 14.dp)
+) {
+val ready = pullProgress >= 1.0f
+Surface(
+shape = RoundedCornerShape(24.dp),
+color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+shadowElevation = 6.dp
+) {
+Row(
+modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+verticalAlignment = Alignment.CenterVertically,
+horizontalArrangement = Arrangement.Center
+) {
+Icon(
+imageVector = Icons.Default.ArrowUpward,
+contentDescription = null,
+tint = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+)
+Spacer(Modifier.width(8.dp))
+Text(
+text = if (ready) "Release to load Next Chapter" else "Pull up to load Next Chapter",
+style = MaterialTheme.typography.labelLarge,
+color = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+)
+}
+}
+}
+}
+}
 private fun Color.toCssHex(): String {
-    val argb = this.toArgb()
-    return String.format(java.util.Locale.US, "#%06X", argb and 0xFFFFFF)
+val argb = this.toArgb()
+return String.format(Locale.US, "#%06X", argb and 0xFFFFFF)
+}
+internal fun escapeForJsSingleQuotedString(raw: String): String {
+    return raw
+        .replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\r", "")
+        .replace("\n", " ")
 }
 
-private fun buildFontFaceInjectionScript(): String {
+internal fun buildHighlightsInjectionScript(highlights: List<BookmarkEntity>): String {
+    val arr = JSONArray()
+    highlights.filter { it.type == "HIGHLIGHT" }.forEach { hl ->
+        arr.put(
+            JSONObject().apply {
+                put("sentenceIndex", hl.sentenceIndex)
+                put("colorHex", hl.colorHex)
+            }
+        )
+    }
+    return "window.lexiApplyUserHighlights && window.lexiApplyUserHighlights($arr);"
+}
+
+internal fun buildFontFaceInjectionScript(customFontName: String = ""): String {
+    val customRule = if (customFontName.isNotBlank()) {
+        val safeName = java.net.URLEncoder.encode(customFontName, StandardCharsets.UTF_8.name())
+        """
+        @font-face {
+            font-family: 'LexiUserCustom';
+            src: url('${EpubParser.ASSET_BASE_URL}__lexi_fonts/custom/$safeName');
+        }
+        """.trimIndent()
+    } else ""
     val fontCss = """
         @font-face {
             font-family: 'LexiLiterata';
@@ -585,37 +920,134 @@ private fun buildFontFaceInjectionScript(): String {
             font-family: 'LexiSans';
             src: url('${EpubParser.ASSET_BASE_URL}__lexi_fonts/plus_jakarta_sans.ttf') format('truetype');
         }
-    """.trimIndent().replace("'", "\\'").replace("\n", " ")
+        @font-face {
+            font-family: 'LexiMono';
+            src: url('${EpubParser.ASSET_BASE_URL}__lexi_fonts/jetbrains_mono.ttf') format('truetype');
+        }
+        @font-face {
+            font-family: 'LexiDyslexia';
+            src: url('${EpubParser.ASSET_BASE_URL}__lexi_fonts/atkinson_hyperlegible.ttf') format('truetype');
+        }
+        $customRule
+    """.trimIndent()
+    val escaped = escapeForJsSingleQuotedString(fontCss)
 
     return """
         (function(){
           var parent = document.head || document.documentElement;
-          if (!parent || document.getElementById('lexi-fonts-style')) return;
-          var el = document.createElement('style');
-          el.id = 'lexi-fonts-style';
-          el.textContent = '$fontCss';
-          parent.appendChild(el);
+          if (!parent) return;
+          var el = document.getElementById('lexi-fonts-style');
+          if (!el) {
+            el = document.createElement('style');
+            el.id = 'lexi-fonts-style';
+            parent.appendChild(el);
+          }
+          el.textContent = '$escaped';
         })();
     """.trimIndent()
 }
 
-private fun buildThemeInjectionScript(settings: ReaderSettings): String {
+internal fun buildThemeInjectionScript(
+    settings: ReaderSettings,
+    forceScrollMode: Boolean = false
+): String {
     val theme = settings.themeMode
-    val bgHex = theme.background.toCssHex()
-    val textHex = theme.text.toCssHex()
+    val isCustom = theme == ReaderThemeMode.CUSTOM
+    val bgColorObj = if (isCustom) {
+        runCatching { Color(android.graphics.Color.parseColor(settings.customThemeBgHex)) }.getOrDefault(theme.background)
+    } else theme.background
+    val textColorObj = if (isCustom) {
+        runCatching { Color(android.graphics.Color.parseColor(settings.customThemeTextHex)) }.getOrDefault(theme.text)
+    } else theme.text
+    val isDarkEffective = if (isCustom) {
+        androidx.core.graphics.ColorUtils.calculateLuminance(bgColorObj.toArgb()) < 0.45
+    } else theme.isDark
+
+    val bgHex = bgColorObj.toCssHex()
+    val textHex = textColorObj.toCssHex()
     val hiBgHex = theme.highlightBg.toCssHex()
     val hiTextHex = theme.highlightText.toCssHex()
-    val linkHex = if (theme == ReaderThemeMode.DARK) "#8CC4FF" else "#1D60A6"
-    val fontName = if (settings.useSerifFont) "LexiLiterata, Georgia, serif" else "LexiSans, sans-serif"
-    val fontSizePx = settings.fontSizeSp.toInt().coerceIn(12, 36)
-    val lineHeight = String.format(java.util.Locale.US, "%.2f", settings.lineSpacing)
-    val marginPx = settings.horizontalMarginDp.coerceIn(8, 48)
+    val linkHex = if (isCustom && settings.customThemeLinkHex.isNotBlank()) {
+        runCatching { Color(android.graphics.Color.parseColor(settings.customThemeLinkHex)).toCssHex() }
+            .getOrDefault(if (isDarkEffective) "#8CC4FF" else "#1D60A6")
+    } else if (isDarkEffective) "#8CC4FF" else "#1D60A6"
+    val borderHex = if (isDarkEffective) "#444C5C" else "#C8C2B8"
 
-    val css = """
+    val fontSizePx = settings.fontSizeSp.toInt().coerceIn(12, 36)
+    val lineHeight = String.format(Locale.US, "%.2f", settings.lineSpacing.coerceIn(1.0f, 2.2f))
+    val paraSpacing = String.format(Locale.US, "%.2fem", settings.paragraphSpacingEm.coerceIn(0f, 2.0f))
+    val marginPx = settings.horizontalMarginDp.coerceIn(8, 48)
+    val isPaged = !forceScrollMode && settings.readingMode == ReaderMode.PAGED
+
+    val explicitFontStack: String? = when (settings.fontFamily) {
+        ReaderFontFamily.ORIGINAL -> if (settings.usePublisherStyling) null else "LexiLiterata, Georgia, serif"
+        ReaderFontFamily.SERIF -> "LexiLiterata, Georgia, serif"
+        ReaderFontFamily.SANS_SERIF -> "LexiSans, sans-serif"
+        ReaderFontFamily.MONOSPACE -> "LexiMono, monospace"
+        ReaderFontFamily.DYSLEXIA -> "LexiDyslexia, LexiSans, sans-serif"
+        ReaderFontFamily.CUSTOM -> if (settings.customFontName.isNotBlank()) "'LexiUserCustom', sans-serif" else "sans-serif"
+    }
+
+    val explicitAlign: String? = when (settings.textAlign) {
+        ReaderTextAlign.PUBLISHER -> if (settings.usePublisherStyling) null else "left"
+        ReaderTextAlign.LEFT -> "left"
+        ReaderTextAlign.JUSTIFY -> "justify"
+    }
+
+    val rootLayoutCss = if (isPaged) {
+        """
+        html {
+            background-color: $bgHex !important;
+            color: $textHex !important;
+            height: 100% !important;
+            width: 100vw !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+            scrollbar-width: none !important;
+            box-sizing: border-box !important;
+        }
+        html::-webkit-scrollbar { display: none !important; }
+        body {
+            background-color: $bgHex !important;
+            color: $textHex !important;
+            font-size: ${fontSizePx}px !important;
+            line-height: $lineHeight !important;
+            height: calc(100% - 24px) !important;
+            width: auto !important;
+            margin: 16px 0 !important;
+            padding: 0 ${marginPx}px !important;
+            box-sizing: border-box !important;
+            column-width: calc(100vw - ${marginPx * 2}px) !important;
+            -webkit-column-width: calc(100vw - ${marginPx * 2}px) !important;
+            column-gap: ${marginPx * 2}px !important;
+            -webkit-column-gap: ${marginPx * 2}px !important;
+            column-fill: auto !important;
+            -webkit-column-fill: auto !important;
+            word-wrap: break-word !important;
+            overflow-wrap: break-word !important;
+        }
+        figure, img, svg, table, pre, h1, h2, h3, h4, h5, h6 {
+            break-inside: avoid-column;
+            -webkit-column-break-inside: avoid;
+        }
+        p, li, blockquote {
+            orphans: 2;
+            widows: 2;
+        }
+        img, svg, video, figure {
+            max-width: 100% !important;
+            max-height: calc(100vh - 56px) !important;
+            height: auto !important;
+            object-fit: contain !important;
+        }
+        """.trimIndent()
+    } else {
+        """
         html, body {
             background-color: $bgHex !important;
             color: $textHex !important;
-            font-family: $fontName !important;
             font-size: ${fontSizePx}px !important;
             line-height: $lineHeight !important;
             margin: 0 !important;
@@ -623,16 +1055,8 @@ private fun buildThemeInjectionScript(settings: ReaderSettings): String {
             box-sizing: border-box !important;
             overflow-x: hidden !important;
             word-wrap: break-word !important;
+            overflow-wrap: break-word !important;
         }
-        body p, body div, body span, body li, body blockquote, body h1, body h2, body h3, body h4, body h5, body h6 {
-            color: inherit !important;
-            font-family: inherit !important;
-            line-height: inherit !important;
-        }
-        body p, body li, body blockquote {
-            font-size: ${fontSizePx}px !important;
-        }
-        a { color: $linkHex !important; }
         img, svg, figure {
             max-width: 100% !important;
             height: auto !important;
@@ -640,6 +1064,73 @@ private fun buildThemeInjectionScript(settings: ReaderSettings): String {
             margin-left: auto;
             margin-right: auto;
         }
+        """.trimIndent()
+    }
+
+    val typographyOverrideCss = buildString {
+        if (settings.usePublisherStyling) {
+            // Preserve publisher @font-face, drop caps, indents, tables, ruby & layout; adapt surface/text colors
+            if (isDarkEffective || isCustom) {
+                append(
+                    """
+                    body p, body div, body span, body li, body blockquote, body dd, body dt, body td, body th,
+                    body h1, body h2, body h3, body h4, body h5, body h6 {
+                        color: $textHex !important;
+                        background-color: transparent !important;
+                    }
+                    """.trimIndent()
+                )
+            } else {
+                append(
+                    """
+                    body, main, article, section {
+                        background-color: transparent !important;
+                    }
+                    """.trimIndent()
+                )
+            }
+            append(" body p, body li, body blockquote { line-height: $lineHeight !important; } ")
+            if (explicitFontStack != null) {
+                append(" html, body, body p, body li, body div, body blockquote, body span, body h1, body h2, body h3, body h4, body h5, body h6 { font-family: $explicitFontStack !important; } ")
+            }
+            if (explicitAlign != null) {
+                append(" body p, body li, body blockquote { text-align: $explicitAlign !important; } ")
+            }
+        } else {
+            val fontCss = explicitFontStack ?: "LexiLiterata, Georgia, serif"
+            val alignCss = explicitAlign ?: "left"
+            append(
+                """
+                html, body {
+                    font-family: $fontCss !important;
+                }
+                body p, body div, body span, body li, body blockquote, body dd, body dt, body td, body th,
+                body h1, body h2, body h3, body h4, body h5, body h6 {
+                    color: inherit !important;
+                    background-color: transparent !important;
+                    font-family: inherit !important;
+                    line-height: inherit !important;
+                }
+                body p, body li, body blockquote {
+                    font-size: ${fontSizePx}px !important;
+                    margin-top: 0 !important;
+                    margin-bottom: $paraSpacing !important;
+                    text-align: $alignCss !important;
+                }
+                """.trimIndent()
+            )
+        }
+        if (settings.fontFamily == ReaderFontFamily.DYSLEXIA) {
+            append(" body p, body li, body blockquote { letter-spacing: 0.03em !important; word-spacing: 0.08em !important; } ")
+        }
+    }
+
+    val commonCss = """
+        a { color: $linkHex !important; }
+        table { border-collapse: collapse; max-width: 100% !important; }
+        th, td { border-color: $borderHex; }
+        ruby { ruby-align: center; }
+        rt { font-size: 0.55em; line-height: 1.1; }
         .lexi-s {
             cursor: pointer;
             border-radius: 4px;
@@ -648,7 +1139,9 @@ private fun buildThemeInjectionScript(settings: ReaderSettings): String {
             background-color: $hiBgHex !important;
             color: $hiTextHex !important;
         }
-    """.trimIndent().replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ")
+    """.trimIndent()
+
+    val fullCss = escapeForJsSingleQuotedString("$rootLayoutCss\n$typographyOverrideCss\n$commonCss")
 
     return """
         (function(){
@@ -660,8 +1153,28 @@ private fun buildThemeInjectionScript(settings: ReaderSettings): String {
             el.id = 'lexi-theme-style';
             parent.appendChild(el);
           }
-          el.textContent = '$css';
+          el.textContent = '$fullCss';
+          var userEl = document.getElementById('lexi-user-css');
+          if (userEl && userEl.parentNode === parent) {
+            parent.appendChild(userEl);
+          }
         })();
     """.trimIndent()
 }
 
+internal fun buildUserCustomCssScript(customCss: String): String {
+    val escaped = escapeForJsSingleQuotedString(customCss.trim())
+    return """
+        (function(){
+          var parent = document.head || document.documentElement;
+          if (!parent) return;
+          var el = document.getElementById('lexi-user-css');
+          if (!el) {
+            el = document.createElement('style');
+            el.id = 'lexi-user-css';
+          }
+          el.textContent = '$escaped';
+          parent.appendChild(el);
+        })();
+    """.trimIndent()
+}
