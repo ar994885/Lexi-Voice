@@ -3,8 +3,11 @@ name: Build & Publish Signed Release APK
 on:
   push:
     branches: [ "main" ]
-    tags:
-      - "v*"
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/**'
+      - '*.md'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +27,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.3.1'
 
@@ -38,15 +41,13 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: gradle assembleRelease
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: LexiVoice-Release-APK
-          path: app/build/outputs/apk/release/*.apk
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/*.apk LexiVoice-Release.apk
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/*.apk
+          tag_name: v1.0.0
+          name: LexiVoice v1.0.0
+          files: LexiVoice-Release.apk
           generate_release_notes: true
