@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -34,6 +35,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkAdd
@@ -58,6 +60,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,13 +82,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.LexiVoiceApplication
 import com.example.data.prefs.ReaderMode
@@ -102,6 +117,7 @@ import com.example.ui.components.ReaderAppearanceBottomBar
 import com.example.ui.components.ReaderAudioPlayerDockedBar
 import com.example.ui.components.ReaderTypographySheet
 import com.example.ui.components.TextSelectionActionBar
+import com.example.ui.components.TextSelectionRectInfo
 import com.example.ui.components.TtsControlsModalSheet
 import com.example.ui.theme.ReaderThemeMode
 import kotlinx.coroutines.flow.flowOf
@@ -127,8 +143,13 @@ fun ReaderScreen(
 ) {
     val context = LocalContext.current
     val view = LocalView.current
+    val density = LocalDensity.current
+    @Suppress("DEPRECATION")
+    val clipboardManager = LocalClipboardManager.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val app = context.applicationContext as LexiVoiceApplication
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val readerSettings by viewModel.readerSettings.collectAsStateWithLifecycle()
     val importedCustomFonts by viewModel.importedCustomFonts.collectAsStateWithLifecycle()
@@ -162,6 +183,33 @@ fun ReaderScreen(
     ) { uri ->
         uri?.let { viewModel.importCustomFont(context, it) }
     }
+    val exportEditedEpubLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/epub+zip")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch { snackbarHostState.showSnackbar("Exporting edited EPUB...") }
+            viewModel.exportEditedEpub(uri) { result ->
+                scope.launch {
+                    if (result.success) {
+                        val snackResult = snackbarHostState.showSnackbar(
+                            message = "Saved edited EPUB (${result.processedChapters} chapter(s) updated)",
+                            actionLabel = "Import Copy to Library",
+                            duration = SnackbarDuration.Long
+                        )
+                        if (snackResult == SnackbarResult.ActionPerformed) {
+                            val imported = app.libraryRepository.importSingleEpubUri(uri)
+                            snackbarHostState.showSnackbar(
+                                if (imported != null) "Imported \"${imported.title}\" to Library"
+                                else "Saved EPUB; could not auto-import copy"
+                            )
+                        }
+                    } else {
+                        snackbarHostState.showSnackbar(result.errorMessage ?: "EPUB export failed.")
+                    }
+                }
+            }
+        }
+    }
     var showTtsSheet by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var showAudioPlayerBar by remember { mutableStateOf(false) }
@@ -170,8 +218,12 @@ fun ReaderScreen(
     var totalPages by remember(uiState.currentChapterIndex) { mutableIntStateOf(1) }
     var targetPageTrigger by remember { mutableStateOf<Pair<Int, Long>?>(null) }
     var pageFlipTrigger by remember { mutableStateOf<Pair<Int, Long>?>(null) }
+    var webActionTrigger by remember { mutableStateOf<Pair<String, Long>?>(null) }
     var selectedWordForRule by remember(bookId, uiState.currentChapterIndex) { mutableStateOf("") }
     var selectedSentenceForAction by remember(bookId, uiState.currentChapterIndex) { mutableIntStateOf(-1) }
+    var selectionRectInfo by remember(bookId, uiState.currentChapterIndex) { mutableStateOf(TextSelectionRectInfo()) }
+    var webViewContainerSize by remember { mutableStateOf(IntSize.Zero) }
+    var selectionPillSize by remember { mutableStateOf(IntSize.Zero) }
     var showQuickRuleDialog by remember { mutableStateOf(false) }
     var latestScrollY by remember { mutableIntStateOf(0) }
     var showAudiobookAvailablePrompt by remember(bookId) { mutableStateOf(false) }
@@ -179,6 +231,31 @@ fun ReaderScreen(
     var pendingTtsActionDuringExport by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingExternalUrl by remember { mutableStateOf<String?>(null) }
     var showFinishBookDialog by remember { mutableStateOf(false) }
+
+    val clearTextSelection: () -> Unit = {
+        selectedWordForRule = ""
+        selectedSentenceForAction = -1
+        selectionRectInfo = TextSelectionRectInfo()
+        webActionTrigger = "CLEAR_SELECTION" to System.nanoTime()
+    }
+
+    var wasLifecyclePaused by remember { mutableStateOf(false) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> wasLifecyclePaused = true
+                Lifecycle.Event.ON_RESUME -> {
+                    if (wasLifecyclePaused) {
+                        wasLifecyclePaused = false
+                        viewModel.reloadCurrentChapterForRules()
+                    }
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val chapterHighlights = remember(allBookmarksAndHighlights, uiState.currentChapterIndex) {
         allBookmarksAndHighlights.filter {
@@ -350,6 +427,7 @@ fun ReaderScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
+                    .onGloballyPositioned { webViewContainerSize = it.size }
             ) {
                 when {
                     uiState.isLoading -> {
@@ -407,20 +485,152 @@ fun ReaderScreen(
                                 selectedWordForRule = selected.trim()
                                 selectedSentenceForAction = sentIdx
                             },
+                            onTextSelectedWithRect = { rectInfo ->
+                                selectionRectInfo = rectInfo
+                                if (rectInfo.text.isBlank()) {
+                                    selectedWordForRule = ""
+                                    selectedSentenceForAction = -1
+                                }
+                            },
                             initialPageOnLoad = uiState.initialPageOnLoad,
                             targetPageTrigger = targetPageTrigger,
                             pageFlipTrigger = pageFlipTrigger,
+                            webActionTrigger = webActionTrigger,
                             onPageStateChanged = { cur, tot ->
                                 currentPage = cur
                                 totalPages = tot
                             },
                             onCenterTapped = {
-                                showReaderChrome = !showReaderChrome
+                                if (selectedWordForRule.isNotBlank()) {
+                                    clearTextSelection()
+                                } else {
+                                    showReaderChrome = !showReaderChrome
+                                }
                             },
                             onExternalLinkClicked = { url ->
                                 pendingExternalUrl = url
                             },
                             modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+
+                // Floating Selection Action Pill anchored directly above (or below near top chrome) selected text
+                val showSelectionPill = selectedWordForRule.isNotBlank() && uiState.book != null
+                if (showSelectionPill) {
+                    val offsetPx = remember(
+                        selectionRectInfo,
+                        selectionPillSize,
+                        webViewContainerSize,
+                        showReaderChrome
+                    ) {
+                        val containerW = webViewContainerSize.width
+                        val containerH = webViewContainerSize.height
+                        val gapPx = with(density) { 10.dp.roundToPx() }
+                        val edgeMarginPx = with(density) { 8.dp.roundToPx() }
+                        val topChromePx = if (showReaderChrome) {
+                            with(density) { 64.dp.roundToPx() }
+                        } else {
+                            edgeMarginPx
+                        }
+                        val pillW = selectionPillSize.width
+                        val pillH = selectionPillSize.height
+                        if (containerW <= 0 || containerH <= 0) {
+                            IntOffset(edgeMarginPx, topChromePx)
+                        } else if (selectionRectInfo.text.isNotBlank() && selectionRectInfo.viewportWidthCssPx > 1f) {
+                            val scaleX = containerW.toFloat() / selectionRectInfo.viewportWidthCssPx
+                            val scaleY = if (selectionRectInfo.viewportHeightCssPx > 1f) {
+                                containerH.toFloat() / selectionRectInfo.viewportHeightCssPx
+                            } else {
+                                scaleX
+                            }
+                            val selTopPx = selectionRectInfo.topCssPx * scaleY
+                            val selBottomPx = selectionRectInfo.bottomCssPx * scaleY
+                            val selCenterX = ((selectionRectInfo.leftCssPx + selectionRectInfo.rightCssPx) / 2f) * scaleX
+
+                            val maxX = (containerW - pillW - edgeMarginPx).coerceAtLeast(edgeMarginPx)
+                            val x = (selCenterX - pillW / 2f).roundToInt().coerceIn(edgeMarginPx, maxX)
+
+                            val aboveY = (selTopPx - pillH - gapPx).roundToInt()
+                            val isFullViewportSelection = selTopPx <= topChromePx && selBottomPx >= containerH - gapPx
+                            val y = when {
+                                isFullViewportSelection -> topChromePx + gapPx
+                                aboveY >= topChromePx -> aboveY
+                                else -> {
+                                    val maxY = (containerH - pillH - gapPx).coerceAtLeast(topChromePx)
+                                    (selBottomPx + gapPx).roundToInt().coerceIn(topChromePx, maxY)
+                                }
+                            }
+                            IntOffset(x, y)
+                        } else {
+                            val maxX = (containerW - pillW - edgeMarginPx).coerceAtLeast(edgeMarginPx)
+                            IntOffset(((containerW - pillW) / 2).coerceIn(edgeMarginPx, maxX), topChromePx + gapPx)
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .offset { offsetPx }
+                            .onGloballyPositioned { selectionPillSize = it.size }
+                    ) {
+                        TextSelectionActionBar(
+                            selectedText = selectedWordForRule,
+                            canReadFromHere = selectedSentenceForAction >= 0,
+                            onHighlightColor = { hex ->
+                                viewModel.saveHighlight(
+                                    sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
+                                    selectedText = selectedWordForRule,
+                                    colorHex = hex
+                                )
+                                clearTextSelection()
+                            },
+                            onReadAloudFromHere = {
+                                val idx = selectedSentenceForAction
+                                clearTextSelection()
+                                if (idx >= 0) {
+                                    val action: () -> Unit = {
+                                        showAudioPlayerBar = true
+                                        viewModel.playFromSentence(idx)
+                                    }
+                                    if (exportProgress.isRunning) {
+                                        pendingTtsActionDuringExport = action
+                                    } else {
+                                        action()
+                                    }
+                                }
+                            },
+                            onDefineSelection = {
+                                val query = Uri.encode("define $selectedWordForRule")
+                                clearTextSelection()
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=$query"))
+                                    )
+                                }
+                            },
+                            onAddPronunciationRule = {
+                                showQuickRuleDialog = true
+                            },
+                            onCopySelection = {
+                                clipboardManager.setText(AnnotatedString(selectedWordForRule))
+                                clearTextSelection()
+                                scope.launch { snackbarHostState.showSnackbar("Copied to clipboard") }
+                            },
+                            onSelectAll = {
+                                webActionTrigger = "SELECT_ALL" to System.nanoTime()
+                            },
+                            onShareSelection = {
+                                val shareText = selectedWordForRule
+                                clearTextSelection()
+                                runCatching {
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, shareText)
+                                    }
+                                    context.startActivity(Intent.createChooser(sendIntent, "Share excerpt"))
+                                }
+                            },
+                            onDismiss = { clearTextSelection() }
                         )
                     }
                 }
@@ -663,68 +873,24 @@ fun ReaderScreen(
                                     },
                                     modifier = Modifier.testTag("reader_export_audio_button")
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Export Edited EPUB") },
+                                    leadingIcon = {
+                                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null)
+                                    },
+                                    enabled = uiState.book != null,
+                                    onClick = {
+                                        showMoreMenu = false
+                                        val book = uiState.book ?: return@DropdownMenuItem
+                                        exportEditedEpubLauncher.launch("${book.title} (Edited).epub")
+                                    },
+                                    modifier = Modifier.testTag("reader_export_edited_epub_button")
+                                )
                             }
                         }
                     }
                 )
             }
-        }
-
-        // Rich Text Selection Action Bar
-        AnimatedVisibility(
-            visible = selectedWordForRule.length in 1..280 && uiState.book != null,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = if (showReaderChrome || showAudioPlayerBar) 130.dp else 32.dp)
-        ) {
-            TextSelectionActionBar(
-                selectedText = selectedWordForRule,
-                canReadFromHere = selectedSentenceForAction >= 0,
-                onHighlightColor = { hex ->
-                    viewModel.saveHighlight(
-                        sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
-                        selectedText = selectedWordForRule,
-                        colorHex = hex
-                    )
-                    selectedWordForRule = ""
-                    selectedSentenceForAction = -1
-                },
-                onReadAloudFromHere = {
-                    val idx = selectedSentenceForAction
-                    selectedWordForRule = ""
-                    selectedSentenceForAction = -1
-                    if (idx >= 0) {
-                        val action: () -> Unit = {
-                            showAudioPlayerBar = true
-                            viewModel.playFromSentence(idx)
-                        }
-                        if (exportProgress.isRunning) {
-                            pendingTtsActionDuringExport = action
-                        } else {
-                            action()
-                        }
-                    }
-                },
-                onDefineSelection = {
-                    val query = Uri.encode("define $selectedWordForRule")
-                    runCatching {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=$query"))
-                        )
-                    }
-                    selectedWordForRule = ""
-                },
-                onAddPronunciationRule = {
-                    showQuickRuleDialog = true
-                },
-                onDismiss = {
-                    selectedWordForRule = ""
-                    selectedSentenceForAction = -1
-                }
-            )
         }
 
         // Floating Bottom Appearance Capsule or Docked TTS Bar
@@ -761,6 +927,14 @@ fun ReaderScreen(
                 )
             }
         }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 86.dp)
+        )
     }
 
     // Auto-scrolling Table of Contents Sheet
@@ -912,7 +1086,7 @@ fun ReaderScreen(
             defaultBookId = currentBook.id,
             availableBooks = listOf(currentBook),
             onDismiss = { showQuickRuleDialog = false },
-            onSave = { findText, replaceWith, ruleScope, ruleBookId, matchCase, wholeWord ->
+            onSave = { findText, replaceWith, ruleScope, ruleBookId, matchCase, wholeWord, applyToAudio, applyToReaderText ->
                 scope.launch {
                     app.pronunciationRepository.saveRule(
                         findText = findText,
@@ -921,11 +1095,13 @@ fun ReaderScreen(
                         bookId = ruleBookId,
                         matchCase = matchCase,
                         wholeWordOnly = wholeWord,
-                        isEnabled = true
+                        isEnabled = true,
+                        applyToAudio = applyToAudio,
+                        applyToReaderText = applyToReaderText
                     )
                     showQuickRuleDialog = false
-                    selectedWordForRule = ""
-                    selectedSentenceForAction = -1
+                    clearTextSelection()
+                    viewModel.reloadCurrentChapterForRules()
                 }
             }
         )

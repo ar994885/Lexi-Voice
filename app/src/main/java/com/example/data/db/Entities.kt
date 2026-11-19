@@ -136,5 +136,7 @@ data class PronunciationRuleEntity(
     val bookId: Long? = null,
     val matchCase: Boolean = false,
     val wholeWordOnly: Boolean = true,
-    val isEnabled: Boolean = true
+    val isEnabled: Boolean = true,
+    val applyToAudio: Boolean = true,
+    val applyToReaderText: Boolean = false
 )

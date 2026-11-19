@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -36,21 +38,27 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FormatAlignJustify
 import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.filled.ViewCarousel
 import androidx.compose.material.icons.filled.ViewStream
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -932,6 +940,7 @@ fun CustomCssEditorDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TextSelectionActionBar(
     selectedText: String,
@@ -940,6 +949,9 @@ fun TextSelectionActionBar(
     onReadAloudFromHere: () -> Unit,
     onDefineSelection: () -> Unit,
     onAddPronunciationRule: () -> Unit,
+    onCopySelection: () -> Unit = {},
+    onSelectAll: () -> Unit = {},
+    onShareSelection: () -> Unit = {},
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -949,92 +961,152 @@ fun TextSelectionActionBar(
         "#90CAF9" to "Blue",
         "#F48FB1" to "Pink"
     )
+    var showMoreMenu by remember { mutableStateOf(false) }
+
     Surface(
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        shadowElevation = 8.dp,
-        tonalElevation = 4.dp,
+        shadowElevation = 10.dp,
+        tonalElevation = 6.dp,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
         modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
+            .widthIn(max = 360.dp)
             .testTag("reader_text_selection_bar")
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp, vertical = 4.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "\"${selectedText.take(40)}${if (selectedText.length > 40) "…" else ""}\"",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+            highlightSwatches.forEach { (hex, label) ->
+                val swatchColor = remember(hex) { Color(android.graphics.Color.parseColor(hex)) }
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .clickable { onHighlightColor(hex) }
+                        .testTag("highlight_color_${label.lowercase()}")
                 ) {
-                    highlightSwatches.forEach { (hex, label) ->
-                        val swatchColor = remember(hex) { Color(android.graphics.Color.parseColor(hex)) }
-                        Box(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(swatchColor)
-                                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
-                                .clickable { onHighlightColor(hex) }
-                                .testTag("highlight_color_${label.lowercase()}")
-                        )
-                    }
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.size(30.dp)
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .background(swatchColor)
+                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f), CircleShape)
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 4.dp)
+                    .width(1.dp)
+                    .height(20.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant)
+            )
+
+            if (canReadFromHere) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { onReadAloudFromHere() }
+                        .testTag("selection_read_aloud_button")
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Dismiss selection menu",
-                            modifier = Modifier.size(16.dp)
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Read from here",
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Text(
+                            text = "Read",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1
                         )
                     }
                 }
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (canReadFromHere) {
-                    AssistChip(
-                        onClick = onReadAloudFromHere,
-                        leadingIcon = {
-                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                        },
-                        label = { Text("Read Here", maxLines = 1) },
-                        modifier = Modifier.testTag("selection_read_aloud_button")
+
+            if (selectedText.length <= 280) {
+                TextButton(
+                    onClick = onDefineSelection,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("selection_define_button")
+                ) {
+                    Text("Define", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+
+                TextButton(
+                    onClick = onAddPronunciationRule,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("reader_add_rule_from_selection_button")
+                ) {
+                    Text("Add Rule", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+            }
+
+            Box {
+                IconButton(
+                    onClick = { showMoreMenu = true },
+                    modifier = Modifier
+                        .size(34.dp)
+                        .testTag("selection_more_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "More selection actions",
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-                AssistChip(
-                    onClick = onDefineSelection,
-                    leadingIcon = {
-                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
-                    },
-                    label = { Text("Define", maxLines = 1) },
-                    modifier = Modifier.testTag("selection_define_button")
-                )
-                AssistChip(
-                    onClick = onAddPronunciationRule,
-                    leadingIcon = {
-                        Icon(Icons.Default.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(16.dp))
-                    },
-                    label = { Text("Add Rule", maxLines = 1) },
-                    modifier = Modifier.testTag("reader_add_rule_from_selection_button")
-                )
+                DropdownMenu(
+                    expanded = showMoreMenu,
+                    onDismissRequest = { showMoreMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Copy") },
+                        leadingIcon = {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onCopySelection()
+                        },
+                        modifier = Modifier.testTag("selection_copy_item")
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Select All") },
+                        leadingIcon = {
+                            Icon(Icons.Default.SelectAll, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onSelectAll()
+                        },
+                        modifier = Modifier.testTag("selection_select_all_item")
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Share") },
+                        leadingIcon = {
+                            Icon(Icons.Default.Share, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onShareSelection()
+                        },
+                        modifier = Modifier.testTag("selection_share_item")
+                    )
+                }
             }
         }
     }

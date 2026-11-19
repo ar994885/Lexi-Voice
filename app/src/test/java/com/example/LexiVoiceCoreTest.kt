@@ -1119,6 +1119,281 @@ class LexiVoiceCoreTest {
         assertTrue(!rawM4b.exists())
     }
 
+    @Test
+    fun `pronunciation rules separate audio vs reader text targets migrate cleanly from v6 to v7 and transform text nodes`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        // Verify MIGRATION_6_7 exists and sets expected defaults on a v6 table
+        assertEquals(6, LexiDatabase.MIGRATION_6_7.startVersion)
+        assertEquals(7, LexiDatabase.MIGRATION_6_7.endVersion)
+
+        val db = Room.inMemoryDatabaseBuilder(context, LexiDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val dao = db.pronunciationRuleDao()
+
+        dao.insertRule(
+            com.example.data.db.PronunciationRuleEntity(
+                findText = "Zhao",
+                replaceWith = "Jao",
+                scope = com.example.data.db.PronunciationScope.GLOBAL,
+                bookId = null,
+                applyToAudio = true,
+                applyToReaderText = false
+            )
+        )
+        dao.insertRule(
+            com.example.data.db.PronunciationRuleEntity(
+                findText = "OldName",
+                replaceWith = "NewName",
+                scope = com.example.data.db.PronunciationScope.BOOK,
+                bookId = 5L,
+                applyToAudio = false,
+                applyToReaderText = true
+            )
+        )
+        dao.insertRule(
+            com.example.data.db.PronunciationRuleEntity(
+                findText = "BothTerm",
+                replaceWith = "UnifiedTerm",
+                scope = com.example.data.db.PronunciationScope.GLOBAL,
+                bookId = null,
+                applyToAudio = true,
+                applyToReaderText = true
+            )
+        )
+
+        val audioRules = dao.getEnabledRulesForPlayback(5L)
+        assertEquals(2, audioRules.size)
+        assertTrue(audioRules.any { it.findText == "Zhao" })
+        assertTrue(audioRules.any { it.findText == "BothTerm" })
+        assertTrue(audioRules.none { it.findText == "OldName" })
+
+        val visualRules = dao.getEnabledRulesForReaderDisplay(5L)
+        assertEquals(2, visualRules.size)
+        assertTrue(visualRules.any { it.findText == "OldName" })
+        assertTrue(visualRules.any { it.findText == "BothTerm" })
+        assertTrue(visualRules.none { it.findText == "Zhao" })
+
+        val doc = org.jsoup.Jsoup.parse("<p class=\"intro\"><em>OldName</em> and Zhao met <ruby>漢字<rt>OldName</rt></ruby> with BothTerm.</p>")
+        com.example.tts.PronunciationProcessor.applyReaderRulesToTextNodes(
+            root = doc.body(),
+            rules = visualRules + audioRules,
+            bookId = 5L
+        )
+        val outHtml = doc.body().html()
+        assertTrue(outHtml.contains("class=\"intro\""))
+        assertTrue(outHtml.contains("<em>NewName</em>"))
+        assertTrue(outHtml.contains("Zhao")) // audio-only rule did not alter visual text
+        assertTrue(outHtml.contains("UnifiedTerm"))
+        assertTrue(outHtml.contains("<rt>OldName</rt>")) // ruby annotation untouched
+
+        db.close()
+    }
+
+    @Test
+    fun `epub parser applies visual reader rules while preserving original tts sentences and emits selection rect bridge`() {
+        val html = """
+            <html>
+              <body>
+                <p>OldHero entered the hall. Zhao spoke softly.</p>
+              </body>
+            </html>
+        """.trimIndent()
+        val rules = listOf(
+            com.example.data.db.PronunciationRuleEntity(
+                id = 1L,
+                findText = "OldHero",
+                replaceWith = "NewHero",
+                scope = com.example.data.db.PronunciationScope.GLOBAL,
+                applyToAudio = false,
+                applyToReaderText = true
+            ),
+            com.example.data.db.PronunciationRuleEntity(
+                id = 2L,
+                findText = "Zhao",
+                replaceWith = "Jao",
+                scope = com.example.data.db.PronunciationScope.GLOBAL,
+                applyToAudio = true,
+                applyToReaderText = false
+            )
+        )
+
+        val payload = EpubParser.buildWebChapterPayload(
+            chapterIndex = 0,
+            chapterTitle = "Tale of OldHero",
+            chapterHref = "OEBPS/ch1.xhtml",
+            rawHtml = html,
+            visualRules = rules,
+            bookId = null
+        )
+
+        assertEquals("Tale of NewHero", payload.chapterTitle)
+        assertTrue(payload.htmlWithSentenceSpans.contains("NewHero"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("data-idx=\"0\""))
+        assertTrue(payload.htmlWithSentenceSpans.contains("data-idx=\"1\""))
+        // Original TTS sentences remain unmutated by visual-only rule
+        assertEquals("OldHero entered the hall.", payload.sentences[0].text)
+        assertEquals("Zhao spoke softly.", payload.sentences[1].text)
+        assertTrue(payload.htmlWithSentenceSpans.contains("onTextSelectedWithRect"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("lexiSelectAll"))
+    }
+
+    @Test
+    fun `epub exporter streams mimetype stored first preserves assets verbatim and rewrites xhtml text nodes`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val srcEpub = File(context.cacheDir, "export_src.epub")
+        val outEpub = File(context.cacheDir, "export_dst.epub")
+        createSampleEpub(srcEpub)
+
+        val rules = listOf(
+            com.example.data.db.PronunciationRuleEntity(
+                id = 10L,
+                findText = "Time Traveller",
+                replaceWith = "Chrono Voyager",
+                scope = com.example.data.db.PronunciationScope.GLOBAL,
+                applyToAudio = false,
+                applyToReaderText = true
+            )
+        )
+
+        java.util.zip.ZipFile(srcEpub).use { zip ->
+            FileOutputStream(outEpub).use { fos ->
+                val result = com.example.export.EpubExporter.exportEditedEpubToStream(
+                    zip = zip,
+                    bookId = null,
+                    visualRules = rules,
+                    outputStream = fos
+                )
+                assertTrue(result.success)
+                assertEquals(2, result.processedChapters)
+            }
+        }
+
+        java.util.zip.ZipFile(outEpub).use { outZip ->
+            val entries = outZip.entries().toList()
+            assertTrue(entries.isNotEmpty())
+            assertEquals("mimetype", entries.first().name)
+            assertEquals(ZipEntry.STORED, entries.first().method)
+
+            val cssText = outZip.getInputStream(outZip.getEntry("OEBPS/styles.css")).bufferedReader().readText()
+            assertEquals("body { font-family: serif; }", cssText)
+
+            val ch1Text = outZip.getInputStream(outZip.getEntry("OEBPS/ch1.xhtml")).bufferedReader().readText()
+            assertTrue(ch1Text.contains("Chrono Voyager"))
+            assertTrue(!ch1Text.contains("Time Traveller"))
+            assertTrue(ch1Text.contains("styles.css"))
+        }
+
+        srcEpub.delete()
+        outEpub.delete()
+    }
+
+    @Test
+    fun `webview theme script preserves publisher accent colors in dark modes and disables tap highlight`() {
+        val darkPublisherSettings = com.example.data.prefs.ReaderSettings(
+            themeMode = com.example.ui.theme.ReaderThemeMode.AMOLED_BLACK,
+            usePublisherStyling = true,
+            readingMode = com.example.data.prefs.ReaderMode.SCROLL
+        )
+        val script = com.example.ui.components.buildThemeInjectionScript(darkPublisherSettings)
+        assertTrue(script.contains("-webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important"))
+        assertTrue(script.contains("-webkit-touch-callout: none !important"))
+        assertTrue(script.contains("user-select: text !important"))
+        // Publisher styling in Dark/AMOLED should NOT clobber inline span or heading colors with !important
+        assertTrue(!script.contains("body span,"))
+        assertTrue(!script.contains("body h1,"))
+        assertTrue(script.contains("background-color: transparent !important"))
+    }
+
+    @Test
+    fun `backup sync repository exports and imports rules and bookmarks deduplicating across reimports`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val db = Room.inMemoryDatabaseBuilder(context, LexiDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val prefs = com.example.data.prefs.PreferencesRepository(context)
+        val syncRepo = com.example.data.repo.BackupSyncRepository(context, db, prefs)
+
+        db.bookDao().upsertPreservingProgress(
+            listOf(
+                BookEntity(
+                    fileKey = "/books/shared_book.epub",
+                    folderKey = "/books",
+                    isDirectPath = true,
+                    title = "Shared Chronicle",
+                    author = "Author A",
+                    chapterCount = 5
+                )
+            )
+        )
+        val book = db.bookDao().getBookByFileKey("/books/shared_book.epub")!!
+        db.pronunciationRuleDao().insertRule(
+            com.example.data.db.PronunciationRuleEntity(
+                findText = "Aether",
+                replaceWith = "Ether",
+                scope = com.example.data.db.PronunciationScope.BOOK,
+                bookId = book.id,
+                applyToAudio = true,
+                applyToReaderText = true
+            )
+        )
+        db.bookmarkDao().insertBookmark(
+            com.example.data.db.BookmarkEntity(
+                bookId = book.id,
+                chapterIndex = 2,
+                sentenceIndex = 4,
+                selectedText = "Important highlight quote.",
+                note = "Check later",
+                colorHex = "#FFF59D",
+                type = "HIGHLIGHT"
+            )
+        )
+
+        val json = syncRepo.exportToJsonString()
+        assertTrue(json.contains("Shared Chronicle"))
+        assertTrue(json.contains("applyToReaderText"))
+
+        // Re-import into same DB should skip duplicates
+        val dupSummary = syncRepo.importFromJsonString(json)
+        assertEquals(0, dupSummary.addedRules)
+        assertEquals(1, dupSummary.skippedRules)
+        assertEquals(0, dupSummary.addedBookmarks)
+        assertEquals(1, dupSummary.skippedBookmarks)
+
+        // Import into a second DB where the same book has a different fileKey but same title
+        val db2 = Room.inMemoryDatabaseBuilder(context, LexiDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        db2.bookDao().upsertPreservingProgress(
+            listOf(
+                BookEntity(
+                    fileKey = "/other_device/shared_book.epub",
+                    folderKey = "/other_device",
+                    isDirectPath = true,
+                    title = "Shared Chronicle",
+                    author = "Author A",
+                    chapterCount = 5
+                )
+            )
+        )
+        val syncRepo2 = com.example.data.repo.BackupSyncRepository(context, db2, prefs)
+        val restored = syncRepo2.importFromJsonString(json)
+        assertEquals(1, restored.addedRules)
+        assertEquals(1, restored.addedBookmarks)
+
+        val book2 = db2.bookDao().getBookByFileKey("/other_device/shared_book.epub")!!
+        val restoredRules = db2.pronunciationRuleDao().getEnabledRulesForReaderDisplay(book2.id)
+        assertEquals(1, restoredRules.size)
+        assertEquals("Ether", restoredRules.first().replaceWith)
+        val restoredBookmarks = db2.bookmarkDao().getAllBookmarksOnce()
+        assertEquals(1, restoredBookmarks.size)
+        assertEquals(book2.id, restoredBookmarks.first().bookId)
+        assertEquals("Check later", restoredBookmarks.first().note)
+
+        db.close()
+        db2.close()
+    }
+
     private fun wrapAtom(type: String, payload: ByteArray): ByteArray {
         val sz = 8 + payload.size
         return ByteBuffer.allocate(sz).order(ByteOrder.BIG_ENDIAN).apply {

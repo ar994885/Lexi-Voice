@@ -16,6 +16,8 @@ import com.example.data.prefs.ReaderFontFamily
 import com.example.data.prefs.ReaderSettings
 import com.example.epub.EpubChapterSummary
 import com.example.epub.EpubParser
+import com.example.export.EpubExportResult
+import com.example.export.EpubExporter
 import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsSessionContent
 import com.example.tts.TtsSourceType
@@ -174,6 +176,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 )
             }
+            app.backupSyncRepository.scheduleAutoMirror()
         }
     }
 
@@ -194,12 +197,14 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     type = "HIGHLIGHT"
                 )
             )
+            app.backupSyncRepository.scheduleAutoMirror()
         }
     }
 
     fun deleteBookmarkOrHighlight(id: Long) {
         viewModelScope.launch {
             bookmarkDao.deleteBookmark(id)
+            app.backupSyncRepository.scheduleAutoMirror()
         }
     }
 
@@ -222,13 +227,16 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 viewModelScope.launch {
                     val summary = current.chapters[targetCh]
                     val payload = withContext(Dispatchers.IO) {
+                        val visualRules = app.pronunciationRepository.getEnabledRulesForReaderDisplay(current.book.id)
                         EpubParser.loadChapterForWebView(
                             context = app,
                             fileKey = current.book.fileKey,
                             isDirectPath = current.book.isDirectPath,
                             chapterIndex = targetCh,
                             chapterHref = summary.href,
-                            chapterTitle = summary.title
+                            chapterTitle = summary.title,
+                            visualRules = visualRules,
+                            bookId = current.book.id
                         )
                     }
                     _uiState.value = _uiState.value.copy(
@@ -295,13 +303,16 @@ pendingJumpChapter = -1
 pendingJumpSentence = -1
 }
 val payload = withContext(Dispatchers.IO) {
+val visualRules = app.pronunciationRepository.getEnabledRulesForReaderDisplay(book.id)
 EpubParser.loadChapterForWebView(
 context = app,
 fileKey = book.fileKey,
 isDirectPath = book.isDirectPath,
 chapterIndex = targetChapterIdx,
 chapterHref = chapters[targetChapterIdx].href,
-chapterTitle = chapters[targetChapterIdx].title
+chapterTitle = chapters[targetChapterIdx].title,
+visualRules = visualRules,
+bookId = book.id
 )
 }
 _uiState.value = ReaderUiState(
@@ -339,13 +350,16 @@ val autoSpeakSentence = startPlayingFromSentence ?: if (wasPlayingThisBook) 0 el
 viewModelScope.launch {
 val summary = current.chapters[chapterIndex]
 val payload = withContext(Dispatchers.IO) {
+val visualRules = app.pronunciationRepository.getEnabledRulesForReaderDisplay(book.id)
 EpubParser.loadChapterForWebView(
 context = app,
 fileKey = book.fileKey,
 isDirectPath = book.isDirectPath,
 chapterIndex = chapterIndex,
 chapterHref = summary.href,
-chapterTitle = summary.title
+chapterTitle = summary.title,
+visualRules = visualRules,
+bookId = book.id
 )
 }
 _uiState.value = _uiState.value.copy(
@@ -376,19 +390,66 @@ if (ttsChapterIndex !in current.chapters.indices) return
 viewModelScope.launch {
 val summary = current.chapters[ttsChapterIndex]
 val payload = withContext(Dispatchers.IO) {
+val visualRules = app.pronunciationRepository.getEnabledRulesForReaderDisplay(current.book.id)
 EpubParser.loadChapterForWebView(
 context = app,
 fileKey = current.book.fileKey,
 isDirectPath = current.book.isDirectPath,
 chapterIndex = ttsChapterIndex,
 chapterHref = summary.href,
-chapterTitle = summary.title
+chapterTitle = summary.title,
+visualRules = visualRules,
+bookId = current.book.id
 )
 }
 _uiState.value = _uiState.value.copy(
 currentChapterIndex = ttsChapterIndex,
 webChapterPayload = payload
 )
+}
+}
+fun reloadCurrentChapterForRules() {
+val current = _uiState.value
+val book = current.book ?: return
+val summary = current.chapters.getOrNull(current.currentChapterIndex) ?: return
+viewModelScope.launch {
+val payload = withContext(Dispatchers.IO) {
+val visualRules = app.pronunciationRepository.getEnabledRulesForReaderDisplay(book.id)
+EpubParser.loadChapterForWebView(
+context = app,
+fileKey = book.fileKey,
+isDirectPath = book.isDirectPath,
+chapterIndex = current.currentChapterIndex,
+chapterHref = summary.href,
+chapterTitle = summary.title,
+visualRules = visualRules,
+bookId = book.id
+)
+}
+_uiState.value = _uiState.value.copy(webChapterPayload = payload)
+}
+}
+fun exportEditedEpub(
+destinationUri: Uri,
+onResult: (EpubExportResult) -> Unit
+) {
+val book = _uiState.value.book ?: run {
+onResult(EpubExportResult(success = false, errorMessage = "Book not loaded"))
+return
+}
+viewModelScope.launch {
+val visualRules = withContext(Dispatchers.IO) {
+app.pronunciationRepository.getEnabledRulesForReaderDisplay(book.id)
+}
+val result = EpubExporter.exportEditedEpubToUri(
+context = app,
+sourceFileKey = book.fileKey,
+isDirectPath = book.isDirectPath,
+bookId = book.id,
+visualRules = visualRules,
+destinationUri = destinationUri
+)
+onResult(result)
 }
 }
 fun playFromSentence(sentenceIndex: Int) {

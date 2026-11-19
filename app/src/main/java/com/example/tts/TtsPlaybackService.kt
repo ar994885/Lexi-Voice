@@ -487,7 +487,7 @@ class TtsPlaybackService : Service() {
             }
             val latestState = TtsStateHolder.state.value
             if (!latestState.isPlaying || latestState.sentenceIndex != st.sentenceIndex) return@launch
-            val spokenText = PronunciationProcessor.applyRules(
+            val spokenText = PronunciationProcessor.applyAudioRules(
                 rawText = sentence.text,
                 rules = rules,
                 bookId = bookIdForRules

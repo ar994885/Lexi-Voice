@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,9 +30,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Book
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.RecordVoiceOver
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -49,6 +53,8 @@ import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
@@ -77,6 +83,7 @@ import com.example.data.db.BookEntity
 import com.example.data.db.LibrarySortOption
 import com.example.data.db.PronunciationRuleEntity
 import com.example.data.db.PronunciationScope
+import com.example.data.repo.BackupSyncRepository
 import com.example.tts.TtsPlaybackService
 import kotlinx.coroutines.launch
 
@@ -96,7 +103,41 @@ fun SpeakingTextProcessScreen(
     val context = LocalContext.current
     val app = context.applicationContext as LexiVoiceApplication
     val repo = app.pronunciationRepository
+    val backupRepo = app.backupSyncRepository
     val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = backupRepo.exportToUri(uri)
+                snackbarHostState.showSnackbar(
+                    if (ok) "Exported rules & highlights backup (.json)"
+                    else "Failed to export backup file"
+                )
+            }
+        }
+    }
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                backupRepo.importFromUri(uri).fold(
+                    onSuccess = { summary ->
+                        snackbarHostState.showSnackbar(
+                            "Imported ${summary.addedRules} rule(s), ${summary.addedBookmarks} bookmark/highlight(s)"
+                        )
+                    },
+                    onFailure = { err ->
+                        snackbarHostState.showSnackbar("Import failed: ${err.message ?: "Invalid backup"}")
+                    }
+                )
+            }
+        }
+    }
 
     val allRules by repo.observeAllRules().collectAsStateWithLifecycle(emptyList())
     val allBooks by app.libraryRepository.observeLibraryBooks("", null, LibrarySortOption.TITLE)
@@ -144,6 +185,7 @@ fun SpeakingTextProcessScreen(
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             TopAppBar(
                 modifier = Modifier.statusBarsPadding(),
@@ -159,7 +201,7 @@ fun SpeakingTextProcessScreen(
                     Column {
                         Text("Speaking Text Process", style = MaterialTheme.typography.titleLarge)
                         Text(
-                            text = selectedBook?.title?.let { "Book: $it" } ?: "Global & Book Pronunciation Rules",
+                            text = selectedBook?.title?.let { "Book: $it" } ?: "Global & Book Text/Pronunciation Rules",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -252,11 +294,39 @@ fun SpeakingTextProcessScreen(
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Text(
-                    text = "Rules alter spoken TTS and exported MP3/M4B audio only. EPUB display text remains unchanged. Single-Book rules run before Global rules.",
+                    text = "Target TTS/Audio and/or EPUB Reader Display per rule. Reader Display rules also rewrite text when exporting an edited EPUB. Single-Book rules run before Global rules.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                 )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { exportBackupLauncher.launch(BackupSyncRepository.AUTO_MIRROR_FILENAME) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("rules_export_backup_button")
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Export JSON", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                OutlinedButton(
+                    onClick = { importBackupLauncher.launch(arrayOf("application/json", "*/*")) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("rules_import_backup_button")
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Import JSON", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
 
             if (filteredRules.isEmpty()) {
@@ -339,7 +409,7 @@ fun SpeakingTextProcessScreen(
             defaultBookId = selectedBookId,
             availableBooks = allBooks,
             onDismiss = { showEditorDialog = false },
-            onSave = { findText, replaceWith, ruleScope, ruleBookId, matchCase, wholeWord ->
+            onSave = { findText, replaceWith, ruleScope, ruleBookId, matchCase, wholeWord, applyToAudio, applyToReaderText ->
                 scope.launch {
                     repo.saveRule(
                         id = editingRule?.id ?: 0L,
@@ -349,7 +419,9 @@ fun SpeakingTextProcessScreen(
                         bookId = ruleBookId,
                         matchCase = matchCase,
                         wholeWordOnly = wholeWord,
-                        isEnabled = editingRule?.isEnabled ?: true
+                        isEnabled = editingRule?.isEnabled ?: true,
+                        applyToAudio = applyToAudio,
+                        applyToReaderText = applyToReaderText
                     )
                     showEditorDialog = false
                 }
@@ -443,6 +515,32 @@ private fun PronunciationRuleCard(
                                 )
                             }
                         }
+                        if (rule.applyToAudio) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "TTS/Audio",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                        if (rule.applyToReaderText) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "Reader Text",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
                         if (rule.matchCase) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant,
@@ -503,7 +601,9 @@ fun PronunciationRuleEditorDialog(
         scope: PronunciationScope,
         bookId: Long?,
         matchCase: Boolean,
-        wholeWordOnly: Boolean
+        wholeWordOnly: Boolean,
+        applyToAudio: Boolean,
+        applyToReaderText: Boolean
     ) -> Unit
 ) {
     val context = LocalContext.current
@@ -528,6 +628,8 @@ fun PronunciationRuleEditorDialog(
     }
     var matchCase by remember(existingRule) { mutableStateOf(existingRule?.matchCase ?: false) }
     var wholeWordOnly by remember(existingRule) { mutableStateOf(existingRule?.wholeWordOnly ?: true) }
+    var applyToAudio by remember(existingRule) { mutableStateOf(existingRule?.applyToAudio ?: true) }
+    var applyToReaderText by remember(existingRule) { mutableStateOf(existingRule?.applyToReaderText ?: false) }
     var bookMenuExpanded by remember { mutableStateOf(false) }
 
     val selectedBookTitle = remember(targetBookId, availableBooks) {
@@ -538,7 +640,7 @@ fun PronunciationRuleEditorDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(if (existingRule == null) "Add Pronunciation Rule" else "Edit Pronunciation Rule")
+            Text(if (existingRule == null) "Add Text / Pronunciation Rule" else "Edit Text / Pronunciation Rule")
         },
         text = {
             Column(
@@ -551,7 +653,7 @@ fun PronunciationRuleEditorDialog(
                     value = findText,
                     onValueChange = { findText = it },
                     label = { Text("Original Text") },
-                    placeholder = { Text("e.g., martial arts") },
+                    placeholder = { Text("e.g., martial arts or character name") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -561,7 +663,7 @@ fun PronunciationRuleEditorDialog(
                 OutlinedTextField(
                     value = replaceWith,
                     onValueChange = { replaceWith = it },
-                    label = { Text("Speak As (Replacement)") },
+                    label = { Text("Replacement Text (Speak / Display As)") },
                     placeholder = { Text("e.g., maartial arts") },
                     singleLine = true,
                     modifier = Modifier
@@ -586,6 +688,48 @@ fun PronunciationRuleEditorDialog(
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text("Test Pronunciation")
+                }
+
+                HorizontalDivider()
+
+                Text("Apply Rule To", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("TTS & Audio Export", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Modifies spoken voice & MP3/M4B export",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = applyToAudio,
+                        onCheckedChange = { applyToAudio = it },
+                        modifier = Modifier.testTag("pronunciation_apply_audio_switch")
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("Reader Display & Edited EPUB", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Replaces visible words in Reader & EPUB export",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = applyToReaderText,
+                        onCheckedChange = { applyToReaderText = it },
+                        modifier = Modifier.testTag("pronunciation_apply_reader_switch")
+                    )
                 }
 
                 HorizontalDivider()
@@ -670,9 +814,19 @@ fun PronunciationRuleEditorDialog(
             Button(
                 onClick = {
                     val bookIdToSave = if (scopeChoice == PronunciationScope.BOOK) targetBookId else null
-                    onSave(findText.trim(), replaceWith.trim(), scopeChoice, bookIdToSave, matchCase, wholeWordOnly)
+                    onSave(
+                        findText.trim(),
+                        replaceWith.trim(),
+                        scopeChoice,
+                        bookIdToSave,
+                        matchCase,
+                        wholeWordOnly,
+                        applyToAudio,
+                        applyToReaderText
+                    )
                 },
                 enabled = findText.isNotBlank() && replaceWith.isNotBlank() &&
+                    (applyToAudio || applyToReaderText) &&
                     (scopeChoice == PronunciationScope.GLOBAL || (targetBookId ?: -1L) > 0L),
                 modifier = Modifier.testTag("save_pronunciation_rule_button")
             ) {

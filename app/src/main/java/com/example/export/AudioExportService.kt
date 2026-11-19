@@ -232,7 +232,7 @@ class AudioExportService : Service() {
 
                             subChunks.forEachIndexed { subIdx, subText ->
                                 val cleanRaw = subText.trim()
-                                val cleanSpeech = PronunciationProcessor.applyRules(
+                                val cleanSpeech = PronunciationProcessor.applyAudioRules(
                                     rawText = cleanRaw,
                                     rules = activeRules,
                                     bookId = matchedBookId
@@ -358,7 +358,7 @@ class AudioExportService : Service() {
                         var chapterDurationMs = 0L
                         chunks.forEachIndexed { chunkIdx, chunkText ->
                             if (isCancelledFlag) throw CancellationException("Cancelled by user")
-                            val spokenChunk = PronunciationProcessor.applyRules(
+                            val spokenChunk = PronunciationProcessor.applyAudioRules(
                                 rawText = chunkText,
                                 rules = activeRules,
                                 bookId = matchedBookId

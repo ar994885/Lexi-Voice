@@ -240,7 +240,7 @@ class M4bPlaybackService : Service() {
                 jumpToChapterAsync(idx)
             }
             ACTION_SET_SPEED -> {
-                val speed = intent.getFloatExtra(EXTRA_SPEED, 1.0f).coerceIn(0.5f, 2.5f)
+                val speed = intent.getFloatExtra(EXTRA_SPEED, 1.0f).coerceIn(0.5f, 3.0f)
                 exoPlayer?.playbackParameters = PlaybackParameters(speed)
                 M4bPlayerStateHolder.updateState { it.copy(playbackSpeed = speed) }
             }

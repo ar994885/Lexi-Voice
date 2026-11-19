@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Xml
+import com.example.data.db.PronunciationRuleEntity
+import com.example.tts.PronunciationProcessor
 import org.jsoup.Jsoup
 import org.jsoup.nodes.DataNode
 import org.jsoup.nodes.Element
@@ -187,7 +189,9 @@ object EpubParser {
         isDirectPath: Boolean,
         chapterIndex: Int,
         chapterHref: String,
-        chapterTitle: String
+        chapterTitle: String,
+        visualRules: List<PronunciationRuleEntity> = emptyList(),
+        bookId: Long? = null
     ): WebChapterPayload {
         val localZipFile = resolveReadableZipFile(context, fileKey, isDirectPath)
             ?: return emptyWebPayload(chapterIndex, chapterTitle, chapterHref)
@@ -197,7 +201,14 @@ object EpubParser {
                 val entry = getZipEntryIgnoreCase(zip, chapterHref)
                     ?: return emptyWebPayload(chapterIndex, chapterTitle, chapterHref)
                 val rawHtml = zip.getInputStream(entry).bufferedReader(StandardCharsets.UTF_8).readText()
-                buildWebChapterPayload(chapterIndex, chapterTitle, chapterHref, rawHtml)
+                buildWebChapterPayload(
+                    chapterIndex = chapterIndex,
+                    chapterTitle = chapterTitle,
+                    chapterHref = chapterHref,
+                    rawHtml = rawHtml,
+                    visualRules = visualRules,
+                    bookId = bookId
+                )
             }
         } catch (_: Exception) {
             emptyWebPayload(chapterIndex, chapterTitle, chapterHref)
@@ -210,7 +221,9 @@ object EpubParser {
         chapterIndex: Int,
         chapterTitle: String,
         chapterHref: String,
-        rawHtml: String
+        rawHtml: String,
+        visualRules: List<PronunciationRuleEntity> = emptyList(),
+        bookId: Long? = null
     ): WebChapterPayload {
         val doc = Jsoup.parse(rawHtml)
         doc.outputSettings().prettyPrint(false)
@@ -370,6 +383,15 @@ object EpubParser {
                     )
                 )
             }
+        }
+
+        val activeVisualRules = visualRules.filter { it.isEnabled && it.applyToReaderText && it.findText.isNotEmpty() }
+        if (activeVisualRules.isNotEmpty()) {
+            PronunciationProcessor.applyReaderRulesToTextNodes(
+                root = body,
+                rules = activeVisualRules,
+                bookId = bookId
+            )
         }
 
         body.appendChild(
@@ -566,41 +588,94 @@ object EpubParser {
                         } catch (e) {}
                         });
 var lexiSelTimer = null;
-document.addEventListener('selectionchange', function() {
-if (lexiSelTimer) clearTimeout(lexiSelTimer);
-lexiSelTimer = setTimeout(function() {
-try {
-var selection = window.getSelection ? window.getSelection() : null;
-var sel = selection ? selection.toString().trim() : '';
-var sentIdx = -1;
-if (sel.length > 0 && selection && selection.rangeCount > 0) {
-  var range = selection.getRangeAt(0);
-  var tryFindSpan = function(n) {
-    if (!n) return null;
-    var el = n.nodeType === 1 ? n : n.parentElement;
-    if (el && el.closest) {
-      var direct = el.closest('.lexi-s');
-      if (direct) return direct;
-      if (el.querySelector) {
-        return el.querySelector('.lexi-s');
+var lexiHadSelection = false;
+var lexiEmitSelection = function() {
+  try {
+    var selection = window.getSelection ? window.getSelection() : null;
+    var sel = selection ? selection.toString().trim() : '';
+    if (sel.length > 0 && selection && selection.rangeCount > 0) {
+      var range = selection.getRangeAt(0);
+      var rect = range.getBoundingClientRect ? range.getBoundingClientRect() : null;
+      if (!rect || (rect.width <= 0 && rect.height <= 0)) {
+        var rects = range.getClientRects ? range.getClientRects() : null;
+        if (rects && rects.length > 0) rect = rects[0];
+      }
+      var tryFindSpan = function(n) {
+        if (!n) return null;
+        var el = n.nodeType === 1 ? n : n.parentElement;
+        if (el && el.closest) {
+          var direct = el.closest('.lexi-s');
+          if (direct) return direct;
+          if (el.querySelector) {
+            return el.querySelector('.lexi-s');
+          }
+        }
+        return null;
+      };
+      var span = tryFindSpan(selection.anchorNode) || tryFindSpan(selection.focusNode) || tryFindSpan(range.commonAncestorContainer);
+      var sentIdx = -1;
+      if (span) {
+        var parsed = parseInt(span.getAttribute('data-idx'), 10);
+        if (!isNaN(parsed)) sentIdx = parsed;
+      }
+      window.__lexiLastSelectedSentIdx = sentIdx;
+      lexiHadSelection = true;
+      var vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
+      var vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
+      if (window.LexiBridge && window.LexiBridge.onTextSelectedWithRect) {
+        var payloadJson = JSON.stringify({
+          text: sel,
+          sentenceIndex: sentIdx,
+          top: rect ? rect.top : 0,
+          bottom: rect ? rect.bottom : 0,
+          left: rect ? rect.left : 0,
+          right: rect ? rect.right : vw,
+          viewportWidth: vw,
+          viewportHeight: vh
+        });
+        window.LexiBridge.onTextSelectedWithRect(payloadJson);
+      } else if (window.LexiBridge && window.LexiBridge.onTextSelectedWithSentence) {
+        window.LexiBridge.onTextSelectedWithSentence(sel, sentIdx);
+      } else if (window.LexiBridge && window.LexiBridge.onTextSelected) {
+        window.LexiBridge.onTextSelected(sel);
+      }
+    } else if (lexiHadSelection) {
+      lexiHadSelection = false;
+      window.__lexiLastSelectedSentIdx = -1;
+      if (window.LexiBridge && window.LexiBridge.onTextSelectionCleared) {
+        window.LexiBridge.onTextSelectionCleared();
+      } else if (window.LexiBridge && window.LexiBridge.onTextSelectedWithSentence) {
+        window.LexiBridge.onTextSelectedWithSentence('', -1);
       }
     }
-    return null;
-  };
-  var span = tryFindSpan(selection.anchorNode) || tryFindSpan(selection.focusNode) || tryFindSpan(range.commonAncestorContainer);
-  if (span) {
-    var parsed = parseInt(span.getAttribute('data-idx'), 10);
-    if (!isNaN(parsed)) sentIdx = parsed;
-  }
-}
-window.__lexiLastSelectedSentIdx = sentIdx;
-if (window.LexiBridge && window.LexiBridge.onTextSelectedWithSentence) {
-window.LexiBridge.onTextSelectedWithSentence(sel, sentIdx);
-} else if (window.LexiBridge && window.LexiBridge.onTextSelected) {
-window.LexiBridge.onTextSelected(sel);
-}
-} catch (e) {}
-}, 180);
+  } catch (e) {}
+};
+window.lexiSelectAll = function() {
+  try {
+    var ok = document.execCommand && document.execCommand('selectAll');
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (!ok || !sel || sel.toString().trim().length === 0) {
+      if (sel && document.body) {
+        var r = document.createRange();
+        r.selectNodeContents(document.body);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+    }
+    setTimeout(lexiEmitSelection, 30);
+  } catch (e) {}
+};
+window.lexiClearSelection = function() {
+  try {
+    if (window.getSelection) {
+      window.getSelection().removeAllRanges();
+    }
+    lexiHadSelection = false;
+  } catch (e) {}
+};
+document.addEventListener('selectionchange', function() {
+  if (lexiSelTimer) clearTimeout(lexiSelTimer);
+  lexiSelTimer = setTimeout(lexiEmitSelection, 140);
 });
 })();
 """.trimIndent()
@@ -608,10 +683,15 @@ window.LexiBridge.onTextSelected(sel);
 )
 )
 
+        val resolvedChapterTitle = if (activeVisualRules.isNotEmpty()) {
+            PronunciationProcessor.applyReaderRules(chapterTitle, activeVisualRules, bookId)
+        } else {
+            chapterTitle
+        }
 
         return WebChapterPayload(
             chapterIndex = chapterIndex,
-            chapterTitle = chapterTitle,
+            chapterTitle = resolvedChapterTitle,
             baseUrl = baseUrl,
             htmlWithSentenceSpans = doc.outerHtml(),
             sentences = sentences,

@@ -6,7 +6,8 @@ import com.example.data.db.PronunciationScope
 import kotlinx.coroutines.flow.Flow
 
 class PronunciationRepository(
-    private val dao: PronunciationRuleDao
+    private val dao: PronunciationRuleDao,
+    private val onDataChanged: () -> Unit = {}
 ) {
     fun observeAllRules(): Flow<List<PronunciationRuleEntity>> = dao.observeAllRules()
 
@@ -14,6 +15,9 @@ class PronunciationRepository(
 
     suspend fun getEnabledRulesForPlayback(bookId: Long?): List<PronunciationRuleEntity> =
         dao.getEnabledRulesForPlayback(bookId)
+
+    suspend fun getEnabledRulesForReaderDisplay(bookId: Long?): List<PronunciationRuleEntity> =
+        dao.getEnabledRulesForReaderDisplay(bookId)
 
     suspend fun saveRule(
         id: Long = 0L,
@@ -23,7 +27,9 @@ class PronunciationRepository(
         bookId: Long?,
         matchCase: Boolean,
         wholeWordOnly: Boolean,
-        isEnabled: Boolean = true
+        isEnabled: Boolean = true,
+        applyToAudio: Boolean = true,
+        applyToReaderText: Boolean = false
     ): Long {
         val normalizedBookId = if (scope == PronunciationScope.BOOK) bookId?.takeIf { it > 0L } else null
         val entity = PronunciationRuleEntity(
@@ -34,17 +40,27 @@ class PronunciationRepository(
             bookId = normalizedBookId,
             matchCase = matchCase,
             wholeWordOnly = wholeWordOnly,
-            isEnabled = isEnabled
+            isEnabled = isEnabled,
+            applyToAudio = applyToAudio,
+            applyToReaderText = applyToReaderText
         )
-        return if (id > 0L) {
+        val resultId = if (id > 0L) {
             dao.updateRule(entity)
             id
         } else {
             dao.insertRule(entity)
         }
+        onDataChanged()
+        return resultId
     }
 
-    suspend fun setRuleEnabled(id: Long, enabled: Boolean) = dao.setRuleEnabled(id, enabled)
+    suspend fun setRuleEnabled(id: Long, enabled: Boolean) {
+        dao.setRuleEnabled(id, enabled)
+        onDataChanged()
+    }
 
-    suspend fun deleteRule(id: Long) = dao.deleteRule(id)
+    suspend fun deleteRule(id: Long) {
+        dao.deleteRule(id)
+        onDataChanged()
+    }
 }

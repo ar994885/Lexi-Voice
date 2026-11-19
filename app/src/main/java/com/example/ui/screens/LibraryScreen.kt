@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Add
@@ -52,7 +53,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Visibility
@@ -78,6 +78,10 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -88,6 +92,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -112,6 +117,7 @@ import com.example.data.db.BookEntity
 import com.example.data.db.LibrarySortOption
 import com.example.data.db.ShelfEntity
 import com.example.ui.LibraryViewModel
+import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -151,6 +157,9 @@ fun LibraryScreen(
     var selectedBookForAction by remember { mutableStateOf<BookEntity?>(null) }
     var bookToDeleteConfirm by remember { mutableStateOf<BookEntity?>(null) }
     var showShelfPickerForBook by remember { mutableStateOf<BookEntity?>(null) }
+    var pendingExportEpubBook by remember { mutableStateOf<BookEntity?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     var resumeTick by remember { mutableIntStateOf(0) }
@@ -179,6 +188,39 @@ fun LibraryScreen(
         if (uri != null) viewModel.addSafFolder(uri)
     }
 
+    val exportEditedEpubLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/epub+zip")
+    ) { uri ->
+        val bookToExport = pendingExportEpubBook
+        pendingExportEpubBook = null
+        if (uri != null && bookToExport != null) {
+            scope.launch { snackbarHostState.showSnackbar("Exporting edited EPUB...") }
+            viewModel.exportEditedEpubForBook(bookToExport, uri) { result ->
+                scope.launch {
+                    if (result.success) {
+                        val snackResult = snackbarHostState.showSnackbar(
+                            message = "Saved edited EPUB (${result.processedChapters} chapter(s) updated)",
+                            actionLabel = "Import Copy to Library",
+                            duration = SnackbarDuration.Long
+                        )
+                        if (snackResult == SnackbarResult.ActionPerformed) {
+                            viewModel.importEditedCopyToLibrary(uri) { imported ->
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(
+                                        if (imported != null) "Imported \"${imported.title}\" to Library"
+                                        else "Saved EPUB; could not auto-import copy"
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        snackbarHostState.showSnackbar(result.errorMessage ?: "EPUB export failed.")
+                    }
+                }
+            }
+        }
+    }
+
     val singleEpubLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -205,6 +247,7 @@ fun LibraryScreen(
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = { folderPickerLauncher.launch(null) },
@@ -771,6 +814,21 @@ fun LibraryScreen(
                 )
 
                 ListItem(
+                    headlineContent = { Text("Export Edited EPUB") },
+                    supportingContent = { Text("Create a duplicate EPUB with active text rules applied") },
+                    leadingContent = {
+                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null)
+                    },
+                    modifier = Modifier
+                        .clickable {
+                            pendingExportEpubBook = actionBook
+                            selectedBookForAction = null
+                            exportEditedEpubLauncher.launch("${actionBook.title} (Edited).epub")
+                        }
+                        .testTag("book_action_export_edited_epub")
+                )
+
+                ListItem(
                     headlineContent = {
                         Text("Delete Book", color = MaterialTheme.colorScheme.error)
                     },
@@ -1248,7 +1306,7 @@ private fun EmptyLibraryState(
                         .weight(1f)
                         .height(48.dp)
                 ) {
-                    Icon(Icons.Default.MenuBook, contentDescription = null)
+                    Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
                     Text("Open EPUB", maxLines = 1)
                 }

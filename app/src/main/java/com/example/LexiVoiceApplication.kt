@@ -9,6 +9,7 @@ import androidx.work.Configuration
 import com.example.data.db.LexiDatabase
 import com.example.data.prefs.PreferencesRepository
 import com.example.data.repo.AudiobookRepository
+import com.example.data.repo.BackupSyncRepository
 import com.example.data.repo.LibraryRepository
 import com.example.data.repo.PronunciationRepository
 import com.example.library.FolderSyncWorker
@@ -34,8 +35,18 @@ class LexiVoiceApplication : Application(), Configuration.Provider {
             libraryRepository = libraryRepository
         )
     }
+    val backupSyncRepository: BackupSyncRepository by lazy {
+        BackupSyncRepository(
+            context = this,
+            database = database,
+            preferencesRepository = preferencesRepository
+        )
+    }
     val pronunciationRepository: PronunciationRepository by lazy {
-        PronunciationRepository(database.pronunciationRuleDao())
+        PronunciationRepository(
+            dao = database.pronunciationRuleDao(),
+            onDataChanged = { backupSyncRepository.scheduleAutoMirror() }
+        )
     }
 
     override val workManagerConfiguration: Configuration

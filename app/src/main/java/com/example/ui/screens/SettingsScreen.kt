@@ -41,6 +41,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Menu
@@ -50,6 +51,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Spellcheck
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -63,6 +65,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -94,6 +98,7 @@ import com.example.LexiVoiceApplication
 import com.example.data.prefs.FloatingAppearanceMode
 import com.example.data.prefs.FloatingOverlaySettings
 import com.example.data.prefs.ReaderSettings
+import com.example.data.repo.BackupSyncRepository
 import com.example.overlay.FloatingOverlayController
 import com.example.overlay.OverlayStyleHelper
 import com.example.tts.TtsStateHolder
@@ -191,9 +196,43 @@ fun SettingsScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { resumeTick++ }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = app.backupSyncRepository.exportToUri(uri)
+                snackbarHostState.showSnackbar(
+                    if (ok) "Exported rules, bookmarks & highlights (.json)"
+                    else "Failed to export backup file"
+                )
+            }
+        }
+    }
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                app.backupSyncRepository.importFromUri(uri).fold(
+                    onSuccess = { summary ->
+                        snackbarHostState.showSnackbar(
+                            "Merged ${summary.addedRules} rule(s) & ${summary.addedBookmarks} bookmark/highlight(s)"
+                        )
+                    },
+                    onFailure = { err ->
+                        snackbarHostState.showSnackbar("Import failed: ${err.message ?: "Invalid JSON"}")
+                    }
+                )
+            }
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         topBar = {
             TopAppBar(
                 modifier = Modifier.statusBarsPadding(),
@@ -475,6 +514,64 @@ fun SettingsScreen(
                         }
                     }
                 )
+            }
+
+            item {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Backup & Sync (Rules & Highlights)",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "LexiVoice automatically mirrors ${BackupSyncRepository.AUTO_MIRROR_FILENAME} to your configured audio export folder whenever rules, bookmarks, or highlights change.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    exportBackupLauncher.launch(BackupSyncRepository.AUTO_MIRROR_FILENAME)
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_export_backup_button")
+                            ) {
+                                Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Export (.json)", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Button(
+                                onClick = {
+                                    importBackupLauncher.launch(arrayOf("application/json", "*/*"))
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("settings_import_backup_button")
+                            ) {
+                                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Import / Merge", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
             }
 
             if (savedExportFolders.isNotEmpty()) {

@@ -57,6 +57,9 @@ interface BookDao {
     @Query("SELECT * FROM books WHERE folderKey = :folderKey")
     suspend fun getBooksForFolder(folderKey: String): List<BookEntity>
 
+    @Query("SELECT * FROM books")
+    suspend fun getAllBooksOnce(): List<BookEntity>
+
     @Query("SELECT COUNT(*) FROM books WHERE folderKey = :folderKey")
     suspend fun countBooksInFolder(folderKey: String): Int
 
@@ -241,6 +244,9 @@ interface BookmarkDao {
     @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
     fun observeAllBookmarks(): Flow<List<BookmarkEntity>>
 
+    @Query("SELECT * FROM bookmarks ORDER BY createdAt DESC")
+    suspend fun getAllBookmarksOnce(): List<BookmarkEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBookmark(bookmark: BookmarkEntity): Long
 
@@ -384,14 +390,26 @@ interface PronunciationRuleDao {
     )
     fun observeRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>>
 
+    @Query("SELECT * FROM pronunciation_rules ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id ASC")
+    suspend fun getAllRulesOnce(): List<PronunciationRuleEntity>
+
     @Query(
         """
         SELECT * FROM pronunciation_rules
-        WHERE isEnabled = 1 AND (scope = 'GLOBAL' OR (:bookId IS NOT NULL AND scope = 'BOOK' AND bookId = :bookId))
+        WHERE isEnabled = 1 AND applyToAudio = 1 AND (scope = 'GLOBAL' OR (:bookId IS NOT NULL AND scope = 'BOOK' AND bookId = :bookId))
         ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id ASC
         """
     )
     suspend fun getEnabledRulesForPlayback(bookId: Long?): List<PronunciationRuleEntity>
+
+    @Query(
+        """
+        SELECT * FROM pronunciation_rules
+        WHERE isEnabled = 1 AND applyToReaderText = 1 AND (scope = 'GLOBAL' OR (:bookId IS NOT NULL AND scope = 'BOOK' AND bookId = :bookId))
+        ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id ASC
+        """
+    )
+    suspend fun getEnabledRulesForReaderDisplay(bookId: Long?): List<PronunciationRuleEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRule(rule: PronunciationRuleEntity): Long

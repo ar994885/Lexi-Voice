@@ -12,7 +12,10 @@ import com.example.data.db.LibrarySortOption
 import com.example.data.db.ShelfEntity
 import com.example.data.db.WatchedFolderEntity
 import com.example.data.repo.ScanProgressState
+import com.example.export.EpubExportResult
+import com.example.export.EpubExporter
 import com.example.library.FolderSyncWorker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +27,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 private data class LibraryFilterCriteria(
@@ -272,5 +276,33 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
             File(ext, "Documents"),
             ext
         ).distinctBy { it.absolutePath }
+    }
+
+    fun exportEditedEpubForBook(
+        book: BookEntity,
+        destinationUri: Uri,
+        onResult: (EpubExportResult) -> Unit
+    ) {
+        viewModelScope.launch {
+            val visualRules = withContext(Dispatchers.IO) {
+                app.pronunciationRepository.getEnabledRulesForReaderDisplay(book.id)
+            }
+            val result = EpubExporter.exportEditedEpubToUri(
+                context = app,
+                sourceFileKey = book.fileKey,
+                isDirectPath = book.isDirectPath,
+                bookId = book.id,
+                visualRules = visualRules,
+                destinationUri = destinationUri
+            )
+            onResult(result)
+        }
+    }
+
+    fun importEditedCopyToLibrary(uri: Uri, onResult: (BookEntity?) -> Unit) {
+        viewModelScope.launch {
+            val imported = libraryRepo.importSingleEpubUri(uri)
+            onResult(imported)
+        }
     }
 }

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import android.view.ActionMode
 import android.view.MotionEvent
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -14,6 +15,8 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewFeature
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -88,6 +91,17 @@ enum class ChapterPullDirection {
     NEXT
 }
 
+data class TextSelectionRectInfo(
+    val text: String = "",
+    val sentenceIndex: Int = -1,
+    val topCssPx: Float = 0f,
+    val bottomCssPx: Float = 0f,
+    val leftCssPx: Float = 0f,
+    val rightCssPx: Float = 0f,
+    val viewportWidthCssPx: Float = 1f,
+    val viewportHeightCssPx: Float = 1f
+)
+
 private class EpubZipHolder(
     private val zip: ZipFile,
     private val tempFile: File?
@@ -134,6 +148,59 @@ private class LexiBookWebView(context: Context) : WebView(context) {
     private val swipeThresholdPx by lazy { 42f * resources.displayMetrics.density }
     private val triggerThresholdPx by lazy { 150f * resources.displayMetrics.density }
 
+    var activeActionMode: ActionMode? = null
+        private set
+    var hasActiveJsSelection: Boolean = false
+
+    fun finishActiveActionMode() {
+        activeActionMode?.finish()
+        activeActionMode = null
+        hasActiveJsSelection = false
+    }
+
+    private fun wrapActionModeCallback(delegate: ActionMode.Callback?): ActionMode.Callback2 {
+        return object : ActionMode.Callback2() {
+            override fun onCreateActionMode(mode: ActionMode, menu: android.view.Menu): Boolean {
+                val keep = delegate?.onCreateActionMode(mode, menu) ?: true
+                menu.clear()
+                if (keep) {
+                    activeActionMode = mode
+                }
+                return keep
+            }
+
+            override fun onPrepareActionMode(mode: ActionMode, menu: android.view.Menu): Boolean {
+                delegate?.onPrepareActionMode(mode, menu)
+                menu.clear()
+                return true
+            }
+
+            override fun onActionItemClicked(mode: ActionMode, item: android.view.MenuItem): Boolean {
+                return delegate?.onActionItemClicked(mode, item) ?: false
+            }
+
+            override fun onDestroyActionMode(mode: ActionMode) {
+                if (activeActionMode === mode) {
+                    activeActionMode = null
+                }
+                delegate?.onDestroyActionMode(mode)
+            }
+
+            override fun onGetContentRect(mode: ActionMode, view: android.view.View, outRect: android.graphics.Rect) {
+                // Keep system FloatingToolbar positioned off-screen and empty so only Compose Selection Pill is shown
+                outRect.set(-10000, -10000, -9999, -9999)
+            }
+        }
+    }
+
+    override fun startActionMode(callback: ActionMode.Callback?): ActionMode? {
+        return super.startActionMode(wrapActionModeCallback(callback))
+    }
+
+    override fun startActionMode(callback: ActionMode.Callback?, type: Int): ActionMode? {
+        return super.startActionMode(wrapActionModeCallback(callback), type)
+    }
+
     override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
         super.onScrollChanged(l, t, oldl, oldt)
         if (!isPagedMode && abs(t - oldt) > 24) {
@@ -154,11 +221,20 @@ private class LexiBookWebView(context: Context) : WebView(context) {
 
     override fun onDetachedFromWindow() {
         handler?.removeCallbacksAndMessages(null)
+        activeActionMode = null
         super.onDetachedFromWindow()
     }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // When text selection or handles are active, never intercept drags/swipes so handles track smoothly
+        if (activeActionMode != null || hasActiveJsSelection) {
+            isHorizontalSwipe = false
+            activePull = ChapterPullDirection.NONE
+            currentProgress = 0f
+            return super.onTouchEvent(event)
+        }
+
         if (isPagedMode) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -236,22 +312,22 @@ private class LexiBookWebView(context: Context) : WebView(context) {
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-val firedDir = if (event.actionMasked == MotionEvent.ACTION_UP && currentProgress >= 1.0f) {
-activePull
-} else {
-ChapterPullDirection.NONE
-}
-activePull = ChapterPullDirection.NONE
-currentProgress = 0f
-onPullStateChanged?.invoke(ChapterPullDirection.NONE, 0f)
-if (firedDir != ChapterPullDirection.NONE) {
-onPullTriggered?.invoke(firedDir)
-return true
-}
-}
-}
-return super.onTouchEvent(event)
-}
+                val firedDir = if (event.actionMasked == MotionEvent.ACTION_UP && currentProgress >= 1.0f) {
+                    activePull
+                } else {
+                    ChapterPullDirection.NONE
+                }
+                activePull = ChapterPullDirection.NONE
+                currentProgress = 0f
+                onPullStateChanged?.invoke(ChapterPullDirection.NONE, 0f)
+                if (firedDir != ChapterPullDirection.NONE) {
+                    onPullTriggered?.invoke(firedDir)
+                    return true
+                }
+            }
+        }
+        return super.onTouchEvent(event)
+    }
 }
 private fun destroyWebViewSafely(wv: LexiBookWebView) {
     wv.onPullStateChanged = null
@@ -282,7 +358,7 @@ private class LexiWebJsBridge(
     private val isAliveProvider: () -> Boolean,
     private val enableSentenceTapProvider: () -> Boolean,
     private val onSentenceTappedCallback: (Int) -> Unit,
-    private val onTextSelectedCallback: (String, Int) -> Unit,
+    private val onTextSelectedCallback: (TextSelectionRectInfo) -> Unit,
     private val onPageStateChangedCallback: (Int, Int) -> Unit,
     private val onPageBoundaryReachedCallback: (Int) -> Unit,
     private val onCenterTappedCallback: () -> Unit,
@@ -300,12 +376,50 @@ private class LexiWebJsBridge(
     @JavascriptInterface
     fun onTextSelected(text: String) {
         if (!isAliveProvider()) return
-        onTextSelectedCallback(text, -1)
+        val clean = text.trim()
+        if (clean.isEmpty()) {
+            onTextSelectedCallback(TextSelectionRectInfo())
+        } else {
+            onTextSelectedCallback(TextSelectionRectInfo(text = clean, sentenceIndex = -1))
+        }
     }
     @JavascriptInterface
     fun onTextSelectedWithSentence(text: String, sentenceIndex: Int) {
         if (!isAliveProvider()) return
-        onTextSelectedCallback(text, sentenceIndex)
+        val clean = text.trim()
+        if (clean.isEmpty()) {
+            onTextSelectedCallback(TextSelectionRectInfo())
+        } else {
+            onTextSelectedCallback(TextSelectionRectInfo(text = clean, sentenceIndex = sentenceIndex))
+        }
+    }
+    @JavascriptInterface
+    fun onTextSelectedWithRect(payloadJson: String) {
+        if (!isAliveProvider()) return
+        val info = runCatching {
+            val obj = JSONObject(payloadJson)
+            val txt = obj.optString("text", "").trim()
+            if (txt.isEmpty()) {
+                TextSelectionRectInfo()
+            } else {
+                TextSelectionRectInfo(
+                    text = txt,
+                    sentenceIndex = obj.optInt("sentenceIndex", -1),
+                    topCssPx = obj.optDouble("top", 0.0).toFloat(),
+                    bottomCssPx = obj.optDouble("bottom", 0.0).toFloat(),
+                    leftCssPx = obj.optDouble("left", 0.0).toFloat(),
+                    rightCssPx = obj.optDouble("right", 0.0).toFloat(),
+                    viewportWidthCssPx = obj.optDouble("viewportWidth", 1.0).toFloat().coerceAtLeast(1f),
+                    viewportHeightCssPx = obj.optDouble("viewportHeight", 1.0).toFloat().coerceAtLeast(1f)
+                )
+            }
+        }.getOrElse { TextSelectionRectInfo() }
+        onTextSelectedCallback(info)
+    }
+    @JavascriptInterface
+    fun onTextSelectionCleared() {
+        if (!isAliveProvider()) return
+        onTextSelectedCallback(TextSelectionRectInfo())
     }
     @JavascriptInterface
     fun onPageStateChanged(currentPage: Int, totalPages: Int) {
@@ -346,9 +460,11 @@ fun EpubWebView(
     onEndOfBookReached: () -> Unit = {},
     onScrollChanged: (Int) -> Unit = {},
     onTextSelectedWithSentence: (String, Int) -> Unit = { _, _ -> },
+    onTextSelectedWithRect: (TextSelectionRectInfo) -> Unit = {},
     initialPageOnLoad: Int = 0,
     targetPageTrigger: Pair<Int, Long>? = null,
     pageFlipTrigger: Pair<Int, Long>? = null,
+    webActionTrigger: Pair<String, Long>? = null,
     forceScrollMode: Boolean = false,
     onPageStateChanged: (currentPage: Int, totalPages: Int) -> Unit = { _, _ -> },
     onCenterTapped: () -> Unit = {},
@@ -377,6 +493,7 @@ fun EpubWebView(
     val latestOnEndOfBook by rememberUpdatedState(onEndOfBookReached)
     val latestOnScroll by rememberUpdatedState(onScrollChanged)
     val latestOnTextSelected by rememberUpdatedState(onTextSelectedWithSentence)
+    val latestOnTextSelectedRect by rememberUpdatedState(onTextSelectedWithRect)
     val latestOnPageStateChanged by rememberUpdatedState(onPageStateChanged)
     val latestOnCenterTapped by rememberUpdatedState(onCenterTapped)
     val latestOnExternalLink by rememberUpdatedState(onExternalLinkClicked)
@@ -455,8 +572,8 @@ zipHolder?.close()
 zipHolder = null
 }
 }
-val contentKey = remember(fileKey, chapterPayload.chapterIndex, chapterPayload.htmlWithSentenceSpans.length, renderGeneration) {
-"$fileKey#${chapterPayload.chapterIndex}#${chapterPayload.htmlWithSentenceSpans.length}#$renderGeneration"
+val contentKey = remember(fileKey, chapterPayload.chapterIndex, chapterPayload.htmlWithSentenceSpans, renderGeneration) {
+    "$fileKey#${chapterPayload.chapterIndex}#${chapterPayload.htmlWithSentenceSpans.length}#${chapterPayload.htmlWithSentenceSpans.hashCode()}#$renderGeneration"
 }
 LaunchedEffect(readerSettings, forceScrollMode, pageLoadedKey, isLifecycleResumed) {
 val wv = webViewRef ?: return@LaunchedEffect
@@ -499,20 +616,35 @@ wv.evaluateJavascript("window.lexiGoToPage && window.lexiGoToPage(${trigger.firs
 }
 }
 }
-LaunchedEffect(pageFlipTrigger, pageLoadedKey, isLifecycleResumed) {
-val trigger = pageFlipTrigger ?: return@LaunchedEffect
-val wv = webViewRef ?: return@LaunchedEffect
-if (isLifecycleResumed && pageLoadedKey == contentKey && !wv.isDestroyedOrDead) {
-runCatching {
-if (effectivePagedMode) {
-wv.evaluateJavascript("window.lexiFlipPage && window.lexiFlipPage(${trigger.first});", null)
-} else {
-val scrollDelta = (wv.height * 0.85f).toInt() * trigger.first
-wv.evaluateJavascript("window.scrollBy({top: $scrollDelta, behavior: 'smooth'});", null)
-}
-}
-}
-}
+    LaunchedEffect(pageFlipTrigger, pageLoadedKey, isLifecycleResumed) {
+        val trigger = pageFlipTrigger ?: return@LaunchedEffect
+        val wv = webViewRef ?: return@LaunchedEffect
+        if (isLifecycleResumed && pageLoadedKey == contentKey && !wv.isDestroyedOrDead) {
+            runCatching {
+                if (effectivePagedMode) {
+                    wv.evaluateJavascript("window.lexiFlipPage && window.lexiFlipPage(${trigger.first});", null)
+                } else {
+                    val scrollDelta = (wv.height * 0.85f).toInt() * trigger.first
+                    wv.evaluateJavascript("window.scrollBy({top: $scrollDelta, behavior: 'smooth'});", null)
+                }
+            }
+        }
+    }
+    LaunchedEffect(webActionTrigger, pageLoadedKey, isLifecycleResumed) {
+        val trigger = webActionTrigger ?: return@LaunchedEffect
+        val wv = webViewRef ?: return@LaunchedEffect
+        if (isLifecycleResumed && !wv.isDestroyedOrDead) {
+            runCatching {
+                when (trigger.first) {
+                    "SELECT_ALL" -> wv.evaluateJavascript("window.lexiSelectAll && window.lexiSelectAll();", null)
+                    "CLEAR_SELECTION" -> {
+                        wv.finishActiveActionMode()
+                        wv.evaluateJavascript("window.lexiClearSelection && window.lexiClearSelection();", null)
+                    }
+                }
+            }
+        }
+    }
 Box(modifier = modifier.fillMaxSize()) {
 if (consecutiveRendererFailures > 3) {
 Column(
@@ -570,6 +702,12 @@ loadWithOverviewMode = false
 allowFileAccess = false
 allowContentAccess = false
 mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
+    WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, false)
+} else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    @Suppress("DEPRECATION")
+    forceDark = WebSettings.FORCE_DARK_OFF
+}
 }
 addJavascriptInterface(
 LexiWebJsBridge(
@@ -578,8 +716,14 @@ enableSentenceTapProvider = { latestEnableSentenceTap },
 onSentenceTappedCallback = { idx ->
 post { if (!this@apply.isDestroyedOrDead) latestOnSentenceTapped(idx) }
 },
-onTextSelectedCallback = { txt, sentIdx ->
-post { if (!this@apply.isDestroyedOrDead) latestOnTextSelected(txt, sentIdx) }
+onTextSelectedCallback = { rectInfo ->
+post {
+    if (!this@apply.isDestroyedOrDead) {
+        this@apply.hasActiveJsSelection = rectInfo.text.isNotBlank()
+        latestOnTextSelected(rectInfo.text, rectInfo.sentenceIndex)
+        latestOnTextSelectedRect(rectInfo)
+    }
+}
 },
 onPageStateChangedCallback = { curPage, totalPages ->
 post { if (!this@apply.isDestroyedOrDead) latestOnPageStateChanged(curPage, totalPages) }
@@ -1069,13 +1213,15 @@ internal fun buildThemeInjectionScript(
 
     val typographyOverrideCss = buildString {
         if (settings.usePublisherStyling) {
-            // Preserve publisher @font-face, drop caps, indents, tables, ruby & layout; adapt surface/text colors
+            // Preserve publisher @font-face, drop caps, tables, ruby, ornamental/accent colors; adapt base surface & text colors cleanly
             if (isDarkEffective || isCustom) {
                 append(
                     """
-                    body p, body div, body span, body li, body blockquote, body dd, body dt, body td, body th,
-                    body h1, body h2, body h3, body h4, body h5, body h6 {
-                        color: $textHex !important;
+                    body, main, article, section {
+                        background-color: transparent !important;
+                    }
+                    body p, body li, body blockquote, body dd, body dt {
+                        color: $textHex;
                         background-color: transparent !important;
                     }
                     """.trimIndent()
@@ -1126,6 +1272,17 @@ internal fun buildThemeInjectionScript(
     }
 
     val commonCss = """
+        *, *::before, *::after {
+            -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important;
+            outline: none !important;
+        }
+        a, img {
+            -webkit-touch-callout: none !important;
+        }
+        body, p, div, span, li, blockquote, h1, h2, h3, h4, h5, h6, td, th, dt, dd {
+            -webkit-user-select: text !important;
+            user-select: text !important;
+        }
         a { color: $linkHex !important; }
         table { border-collapse: collapse; max-width: 100% !important; }
         th, td { border-color: $borderHex; }
