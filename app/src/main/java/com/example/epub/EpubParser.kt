@@ -528,6 +528,21 @@ object EpubParser {
                         return 0;
                       };
 
+                      window.lexiScrollToAnchor = function(anchorId) {
+                        if (!anchorId) return;
+                        var anchor = document.getElementById(anchorId) || document.querySelector('[name="' + anchorId + '"]');
+                        if (anchor) {
+                          if (window.__lexiPagedMode) {
+                            var pW = getPageWidth();
+                            var cS = window.scrollX || document.documentElement.scrollLeft || 0;
+                            var aX = anchor.getBoundingClientRect().left + cS;
+                            window.lexiGoToPage(Math.max(0, Math.floor(aX / pW)), false);
+                          } else {
+                            anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          }
+                        }
+                      };
+
                       document.addEventListener('click', function(ev) {
                         try {
                           var selText = window.getSelection ? window.getSelection().toString().trim() : '';
@@ -538,6 +553,7 @@ object EpubParser {
                             if (href.indexOf('http://') === 0 || href.indexOf('https://') === 0) {
                               if (href.indexOf('${ASSET_BASE_URL}') !== 0) {
                                 ev.preventDefault();
+                                ev.stopPropagation();
                                 if (window.LexiBridge && window.LexiBridge.onExternalLinkClicked) {
                                   window.LexiBridge.onExternalLinkClicked(href);
                                 }
@@ -545,9 +561,11 @@ object EpubParser {
                               }
                             }
                             if (href.indexOf('#') === 0 && href.length > 1) {
-                              var anchor = document.getElementById(href.substring(1));
+                              var anchorId = href.substring(1);
+                              var anchor = document.getElementById(anchorId) || document.querySelector('[name="' + anchorId + '"]');
                               if (anchor) {
                                 ev.preventDefault();
+                                ev.stopPropagation();
                                 if (window.__lexiPagedMode) {
                                   var pW = getPageWidth();
                                   var cS = window.scrollX || document.documentElement.scrollLeft || 0;
@@ -558,6 +576,14 @@ object EpubParser {
                                 }
                                 return;
                               }
+                            }
+                            if (href.length > 0 && href.indexOf('javascript:') !== 0) {
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              if (window.LexiBridge && window.LexiBridge.onInternalLinkClicked) {
+                                window.LexiBridge.onInternalLinkClicked(href);
+                              }
+                              return;
                             }
                           }
                           var vw = getPageWidth();

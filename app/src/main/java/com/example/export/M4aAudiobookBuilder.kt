@@ -436,8 +436,8 @@ object M4aAudiobookBuilder {
 
             if (muxerStarted && !muxerStopped) {
                 muxerStopped = true
-                // Native MPEG4Writer prints/throws if stop() is called with zero samples written
-                if (hasWrittenSamples) {
+                // Native MPEG4Writer prints/throws if stop() is called with zero samples written or uninitialized track
+                if (hasWrittenSamples && trackIndex >= 0) {
                     runCatching { muxer?.stop() }
                 }
             }

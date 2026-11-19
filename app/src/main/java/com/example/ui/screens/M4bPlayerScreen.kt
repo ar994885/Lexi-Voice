@@ -88,6 +88,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -99,6 +100,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
@@ -610,8 +612,9 @@ fun M4bPlayerScreen(
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = 24.dp, vertical = 18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
+                    verticalArrangement = Arrangement.Top
                 ) {
+                    Spacer(Modifier.height(14.dp))
                     DynamicAudiobookCover(
                         coverPath = playerState.coverPath,
                         title = playerState.title
@@ -1034,7 +1037,8 @@ fun M4bPlayerScreen(
 @Composable
 private fun DynamicAudiobookCover(
     coverPath: String?,
-    title: String
+    title: String,
+    modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val coverFile = remember(coverPath) {
@@ -1051,17 +1055,21 @@ private fun DynamicAudiobookCover(
     } else {
         painterResource(id = R.drawable.img_default_cover)
     }
-    val aspectRatio = remember(painter.stateOrNull()) {
-        val sz = painter.intrinsicSize
-        if (sz.width > 0f && sz.height > 0f) {
-            (sz.width / sz.height).coerceIn(0.55f, 1.8f)
-        } else {
-            0.72f
-        }
+    val intrinsicSize = painter.intrinsicSize
+    val aspectRatio = if (
+        intrinsicSize.isSpecified &&
+        intrinsicSize.width > 0f &&
+        intrinsicSize.height > 0f
+    ) {
+        (intrinsicSize.width / intrinsicSize.height).coerceIn(0.55f, 1.8f)
+    } else {
+        0.72f // Safe fallback aspect ratio while loading, on error, or when size is unspecified
     }
 
     BoxWithConstraints(
-        modifier = Modifier.fillMaxWidth(0.78f),
+        modifier = modifier
+            .fillMaxWidth(0.78f)
+            .testTag("m4b_cover_artwork"),
         contentAlignment = Alignment.Center
     ) {
         val maxW = maxWidth
@@ -1080,7 +1088,7 @@ private fun DynamicAudiobookCover(
             modifier = Modifier
                 .width(boxW)
                 .height(boxH)
-                .testTag("m4b_cover_artwork")
+                .heightIn(min = 180.dp, max = 340.dp)
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                 Image(
@@ -1103,11 +1111,6 @@ private fun DynamicAudiobookCover(
             }
         }
     }
-}
-
-@Composable
-private fun androidx.compose.ui.graphics.painter.Painter.stateOrNull(): Any? {
-    return (this as? AsyncImagePainter)?.state
 }
 
 @Composable

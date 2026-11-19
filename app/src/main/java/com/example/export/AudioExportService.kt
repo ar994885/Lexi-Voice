@@ -552,10 +552,11 @@ class AudioExportService : Service() {
     private fun writeSyncMapToSafFolder(folderDoc: DocumentFile, syncMap: BookSyncMap) {
         val json = SyncAlignmentSerializer.encodeBookSyncMap(syncMap)
         runCatching {
-            folderDoc.findFile("sync_map.json")?.delete()
-            val destDoc = folderDoc.createFile("application/json", "sync_map.json") ?: return
-            contentResolver.openOutputStream(destDoc.uri)?.use { out ->
+            val existingDoc = folderDoc.findFile("sync_map.json")
+            val destDoc = existingDoc ?: folderDoc.createFile("application/json", "sync_map.json") ?: return
+            contentResolver.openOutputStream(destDoc.uri, "wt")?.use { out ->
                 out.write(json.toByteArray(StandardCharsets.UTF_8))
+                out.flush()
             }
         }
     }

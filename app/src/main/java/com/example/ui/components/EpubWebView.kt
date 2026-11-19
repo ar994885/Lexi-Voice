@@ -362,7 +362,8 @@ private class LexiWebJsBridge(
     private val onPageStateChangedCallback: (Int, Int) -> Unit,
     private val onPageBoundaryReachedCallback: (Int) -> Unit,
     private val onCenterTappedCallback: () -> Unit,
-    private val onExternalLinkClickedCallback: (String) -> Unit
+    private val onExternalLinkClickedCallback: (String) -> Unit,
+    private val onInternalLinkClickedCallback: (String) -> Unit
 ) {
     @JavascriptInterface
     fun onSentenceTapped(idx: Int) {
@@ -441,6 +442,11 @@ private class LexiWebJsBridge(
         if (!isAliveProvider()) return
         onExternalLinkClickedCallback(url)
     }
+    @JavascriptInterface
+    fun onInternalLinkClicked(url: String) {
+        if (!isAliveProvider()) return
+        onInternalLinkClickedCallback(url)
+    }
 }
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -465,10 +471,12 @@ fun EpubWebView(
     targetPageTrigger: Pair<Int, Long>? = null,
     pageFlipTrigger: Pair<Int, Long>? = null,
     webActionTrigger: Pair<String, Long>? = null,
+    targetAnchorTrigger: Pair<String, Long>? = null,
     forceScrollMode: Boolean = false,
     onPageStateChanged: (currentPage: Int, totalPages: Int) -> Unit = { _, _ -> },
     onCenterTapped: () -> Unit = {},
     onExternalLinkClicked: (String) -> Unit = {},
+    onInternalLinkClicked: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -497,6 +505,7 @@ fun EpubWebView(
     val latestOnPageStateChanged by rememberUpdatedState(onPageStateChanged)
     val latestOnCenterTapped by rememberUpdatedState(onCenterTapped)
     val latestOnExternalLink by rememberUpdatedState(onExternalLinkClicked)
+    val latestOnInternalLink by rememberUpdatedState(onInternalLinkClicked)
     val latestSettings by rememberUpdatedState(readerSettings)
     val latestForceScroll by rememberUpdatedState(forceScrollMode)
     val latestActiveSentence by rememberUpdatedState(activeSentenceIndex)
@@ -645,6 +654,18 @@ wv.evaluateJavascript("window.lexiGoToPage && window.lexiGoToPage(${trigger.firs
             }
         }
     }
+    LaunchedEffect(targetAnchorTrigger, pageLoadedKey, isLifecycleResumed) {
+        val trigger = targetAnchorTrigger ?: return@LaunchedEffect
+        val wv = webViewRef ?: return@LaunchedEffect
+        if (isLifecycleResumed && !wv.isDestroyedOrDead) {
+            runCatching {
+                wv.evaluateJavascript(
+                    "window.lexiScrollToAnchor && window.lexiScrollToAnchor('${trigger.first}');",
+                    null
+                )
+            }
+        }
+    }
 Box(modifier = modifier.fillMaxSize()) {
 if (consecutiveRendererFailures > 3) {
 Column(
@@ -747,6 +768,9 @@ post { if (!this@apply.isDestroyedOrDead) latestOnCenterTapped() }
 },
 onExternalLinkClickedCallback = { url ->
 post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
+},
+onInternalLinkClickedCallback = { url ->
+post { if (!this@apply.isDestroyedOrDead) latestOnInternalLink(url) }
 }
 ),
 "LexiBridge"
@@ -784,7 +808,11 @@ if ((url.startsWith("http://") || url.startsWith("https://")) && !url.startsWith
 post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
 return true
 }
-return false
+if (url.startsWith(EpubParser.ASSET_BASE_URL) || url.startsWith("content://") || url.startsWith("file://")) {
+post { if (!this@apply.isDestroyedOrDead) latestOnInternalLink(url) }
+return true
+}
+return true
 }
 override fun shouldInterceptRequest(
 view: WebView?,
