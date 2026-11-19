@@ -12,6 +12,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -283,14 +284,26 @@ class TtsPlaybackService : Service() {
                     @Deprecated("Deprecated in Java")
                     override fun onError(utteranceId: String?) {
                         if (utteranceId == currentUtteranceId) {
-                            serviceScope.launch { handleSentenceFinished() }
+                            reportTtsFailure(
+                                "The speech engine stopped without producing audio.",
+                                missingVoiceData = false
+                            )
                         }
                     }
 
                     override fun onError(utteranceId: String?, errorCode: Int) {
-                        if (utteranceId == currentUtteranceId) {
-                            serviceScope.launch { handleSentenceFinished() }
+                        if (utteranceId != currentUtteranceId) return
+                        val message = when (errorCode) {
+                            TextToSpeech.ERROR_SYNTHESIS ->
+                                "The speech engine could not synthesise this text (error $errorCode)."
+                            TextToSpeech.ERROR_INVALID_REQUEST ->
+                                "The speech request was rejected by the engine (error $errorCode)."
+                            TextToSpeech.ERROR_OUTPUT ->
+                                "The speech engine could not write its audio output (error $errorCode)."
+                            else ->
+                                "The speech engine reported an error (code $errorCode)."
                         }
+                        reportTtsFailure(message, missingVoiceData = false)
                     }
                 })
 
@@ -455,6 +468,25 @@ class TtsPlaybackService : Service() {
         updateMediaSessionAndNotification()
     }
 
+    /**
+     * Surfaces a speech failure to the UI instead of failing silently.
+     *
+     * Resets isPlaying so the transport controls do not claim playback that is
+     * not happening, and records whether the cause is missing voice data so the
+     * UI can offer the install action.
+     */
+    private fun reportTtsFailure(message: String, missingVoiceData: Boolean) {
+        Log.w(TAG, "TTS failure: $message")
+        TtsStateHolder.updateState {
+            it.copy(
+                isPlaying = false,
+                ttsErrorMessage = message,
+                missingVoiceData = missingVoiceData
+            )
+        }
+        updateMediaSessionAndNotification()
+    }
+
     private fun speakCurrentSentence() {
         val session = TtsStateHolder.sessionContent ?: return
         val st = TtsStateHolder.state.value
@@ -492,6 +524,23 @@ class TtsPlaybackService : Service() {
                 rules = rules,
                 bookId = bookIdForRules
             ).ifBlank { sentence.text }
+
+            // Pre-flight: on several engines a language with no installed voice
+            // data produces silence and never fires onError, so the app would look
+            // like it was playing. Check first and report clearly instead.
+            val localeTag = latestState.selectedLocaleTag
+            if (localeTag.isNotBlank()) {
+                val availability = engine.isLanguageAvailable(Locale.forLanguageTag(localeTag))
+                if (availability == TextToSpeech.LANG_MISSING_DATA ||
+                    availability == TextToSpeech.LANG_NOT_SUPPORTED
+                ) {
+                    reportTtsFailure(
+                        "No voice data is installed for $localeTag. Install voice data to use text-to-speech.",
+                        missingVoiceData = true
+                    )
+                    return@launch
+                }
+            }
 
             currentUtteranceId = "utt_${UUID.randomUUID()}"
             val params = Bundle().apply {
@@ -881,6 +930,7 @@ class TtsPlaybackService : Service() {
     }
 
     companion object {
+        private const val TAG = "TtsPlaybackService"
         private const val NOTIFICATION_ID = 4101
 
         const val ACTION_INIT_ENGINES = "com.example.tts.INIT_ENGINES"

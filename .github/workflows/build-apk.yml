@@ -13,6 +13,11 @@ on:
 permissions:
   contents: write
 
+env:
+  # Bump this on each release. The build falls back to it when the Gradle
+  # property is not supplied, so local and CI builds stay in step.
+  VERSION_NAME: '0.0.3'
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -31,6 +36,17 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
+      # versionCode must strictly increase for every artifact that reaches a
+      # device, or the package manager refuses to install it over an older build.
+      # GITHUB_RUN_NUMBER is monotonic per repository, so offsetting it keeps the
+      # value above any locally built APK (the local fallback is 3).
+      - name: Compute version
+        id: ver
+        run: |
+          echo "code=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Building versionName=${VERSION_NAME} versionCode=$((100 + GITHUB_RUN_NUMBER))"
+
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
 
@@ -39,15 +55,22 @@ jobs:
           KEYSTORE_PATH: ${{ github.workspace }}/release.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle assembleRelease
+        run: |
+          gradle assembleRelease \
+            -Plexivoice.versionCode=${{ steps.ver.outputs.code }} \
+            -Plexivoice.versionName=${{ steps.ver.outputs.name }}
 
+      # Name the artifact from the real version so no two downloads collide and
+      # the filename always matches the manifest.
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/*.apk LexiVoice-Release.apk
+        run: |
+          cp app/build/outputs/apk/release/*.apk \
+             "LexiVoice-Release-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk"
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: LexiVoice v1.0.0
-          files: LexiVoice-Release.apk
+          tag_name: v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}
+          name: LexiVoice v${{ steps.ver.outputs.name }} (${{ steps.ver.outputs.code }})
+          files: LexiVoice-Release-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk
           generate_release_notes: true

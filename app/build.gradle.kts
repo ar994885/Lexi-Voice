@@ -8,16 +8,27 @@ plugins {
   alias(libs.plugins.google.services)
 }
 
+// Version identity is driven by CI and falls back to a strictly increasing local
+// value. Never reuse a versionCode: the package manager refuses to install an
+// APK whose versionCode is not greater than the installed one.
+val lexiVersionCode = providers.gradleProperty("lexivoice.versionCode").orNull
+  ?.toIntOrNull() ?: 3
+val lexiVersionName = providers.gradleProperty("lexivoice.versionName").orNull
+  ?.takeIf { it.isNotBlank() } ?: "0.0.3"
+
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.lexivoice.qrzmpk"
+    // Permanent, owned application ID. It becomes immutable on the first Play
+    // upload, so it is settled before release.
+    applicationId = "app.lexivoice.reader"
     minSdk = 26
-    targetSdk = 35
-    versionCode = 1
-    versionName = "1.0"
+    // Google Play has required API 36 for new apps and updates since 31 Aug 2026.
+    targetSdk = 36
+    versionCode = lexiVersionCode
+    versionName = lexiVersionName
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -31,6 +42,12 @@ android {
       storePassword = System.getenv("STORE_PASSWORD")
       keyAlias = "upload"
       keyPassword = System.getenv("KEY_PASSWORD")
+      // v2 is the minimum for API 24+. v3 carries proof-of-rotation, so enabling
+      // it now keeps the signing key rotatable later. v1 is unnecessary at
+      // minSdk 26 and only adds size.
+      enableV1Signing = false
+      enableV2Signing = true
+      enableV3Signing = true
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -43,7 +60,10 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      // R8 shrinking is what keeps the unused Material icon classes, the unused
+      // Coil/Media3 surface and dead code out of the shipped APK.
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.

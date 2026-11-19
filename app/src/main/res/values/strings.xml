@@ -10,6 +10,7 @@
     <string name="notification_channel_tts">TTS Playback</string>
     <string name="notification_channel_export">Audio Export</string>
     <string name="notification_channel_m4b">Audiobook Playback</string>
+    <string name="notification_channel_overlay">Floating overlay</string>
     <string name="cancel">Cancel</string>
     <string name="select_all">Select All</string>
     <string name="deselect_all">Deselect All</string>

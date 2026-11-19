@@ -108,6 +108,7 @@ import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsSourceType
 import com.example.tts.TtsStateHolder
 import com.example.ui.ReaderViewModel
+import com.example.ui.components.isSafeExternalUrl
 import com.example.ui.components.BookmarksAndHighlightsSheet
 import com.example.ui.components.CustomCssEditorDialog
 import com.example.ui.components.CustomThemeCreatorDialog
@@ -1130,7 +1131,11 @@ fun ReaderScreen(
                     onClick = {
                         pendingExternalUrl = null
                         runCatching {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl)))
+                            // Second line of defence: only http(s) is launched, so a
+                            // crafted EPUB cannot drive an intent:// or custom scheme.
+                            if (isSafeExternalUrl(externalUrl)) {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(externalUrl)))
+                            }
                         }
                     },
                     modifier = Modifier.testTag("confirm_open_external_link")

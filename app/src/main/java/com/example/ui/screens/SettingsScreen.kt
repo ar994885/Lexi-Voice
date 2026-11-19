@@ -157,15 +157,17 @@ fun SettingsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val hasAllFilesAccess = remember(resumeTick) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
+    // Audiobook auto-discovery needs the audio media permission only. All Files
+    // Access is no longer requested: it is a restricted permission that Play
+    // grants to a narrow set of app categories, and MediaStore + SAF cover this
+    // app's storage needs without it.
+    val hasAudioMediaAccess = remember(resumeTick) {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
         } else {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
+            Manifest.permission.READ_EXTERNAL_STORAGE
         }
+        ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
     }
 
     val hasNotificationPerm = remember(resumeTick) {
@@ -192,7 +194,7 @@ fun SettingsScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { resumeTick++ }
 
-    val legacyStoragePermLauncher = rememberLauncherForActivityResult(
+    val audioMediaPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { resumeTick++ }
 
@@ -453,21 +455,19 @@ fun SettingsScreen(
 
             item {
                 SettingsPermissionCard(
-                    title = "All-Files Direct Scanning",
-                    subtitle = if (hasAllFilesAccess) "Granted — direct high-speed file path scanning enabled"
-                    else "Optional: scan internal/SD folders directly without SAF dialogs",
-                    isGranted = hasAllFilesAccess,
+                    title = "Audiobook Auto-Discovery",
+                    subtitle = if (hasAudioMediaAccess) "Granted — .m4b and .mp3 audiobooks are found automatically"
+                    else "Allow LexiVoice to find audiobooks on this device automatically",
+                    isGranted = hasAudioMediaAccess,
                     icon = { Icon(Icons.Default.Security, contentDescription = null) },
                     onGrant = {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                            val intent = Intent(
-                                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                Uri.parse("package:${context.packageName}")
-                            )
-                            context.startActivity(intent)
-                        } else {
-                            legacyStoragePermLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
-                        }
+                        audioMediaPermLauncher.launch(
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                Manifest.permission.READ_MEDIA_AUDIO
+                            } else {
+                                Manifest.permission.READ_EXTERNAL_STORAGE
+                            }
+                        )
                     }
                 )
             }

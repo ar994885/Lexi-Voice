@@ -12,7 +12,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.DocumentsContract
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import android.speech.tts.UtteranceProgressListener
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
@@ -717,20 +719,57 @@ class AudioExportService : Service() {
         return chunks.ifEmpty { listOf(clean) }
     }
 
+    /**
+     * Writes into a SAF folder atomically: the bytes go to a `.part` staging
+     * document first and are promoted to the final name only once the copy has
+     * completed. A job killed mid-write therefore leaves at most a `.part` file,
+     * never a truncated chapter that looks finished. The previous good export is
+     * only replaced after the new one is safely on disk.
+     */
     private fun writeFileToSafFolder(
         folderDoc: DocumentFile,
         sourceFile: File,
         mimeType: String,
         displayName: String
     ): Uri? {
-        folderDoc.findFile(displayName)?.delete()
-        val destDoc = folderDoc.createFile(mimeType, displayName) ?: return null
-        contentResolver.openOutputStream(destDoc.uri)?.use { out ->
-            FileInputStream(sourceFile).use { input ->
-                input.copyTo(out, bufferSize = 32 * 1024)
-            }
+        val stagingName = "$displayName.part"
+        folderDoc.findFile(stagingName)?.delete()
+        val stagingDoc = folderDoc.createFile(mimeType, stagingName) ?: return null
+
+        val copied = runCatching {
+            contentResolver.openOutputStream(stagingDoc.uri)?.use { out ->
+                FileInputStream(sourceFile).use { input ->
+                    input.copyTo(out, bufferSize = 32 * 1024)
+                }
+                out.flush()
+            } != null
+        }.getOrDefault(false)
+
+        if (!copied) {
+            runCatching { stagingDoc.delete() }
+            return null
         }
-        return destDoc.uri
+
+        // Promote: replace any previous export of the same name, then rename.
+        runCatching { folderDoc.findFile(displayName)?.delete() }
+        val promoted = runCatching {
+            DocumentsContract.renameDocument(contentResolver, stagingDoc.uri, displayName)
+        }.getOrNull()
+        if (promoted != null) return promoted
+
+        // Some providers refuse renameDocument; fall back to a second copy so the
+        // final file still exists.
+        runCatching { stagingDoc.delete() }
+        val destDoc = folderDoc.createFile(mimeType, displayName) ?: return null
+        val fallbackOk = runCatching {
+            contentResolver.openOutputStream(destDoc.uri)?.use { out ->
+                FileInputStream(sourceFile).use { input ->
+                    input.copyTo(out, bufferSize = 32 * 1024)
+                }
+                out.flush()
+            } != null
+        }.getOrDefault(false)
+        return if (fallbackOk) destDoc.uri else null
     }
 
     private fun sanitizeFileName(raw: String): String {
@@ -835,7 +874,31 @@ class AudioExportService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * Android 15+ calls this when the foreground service reaches its time limit.
+     * Stop cleanly, tell the UI why, and leave no partial output behind — rather
+     * than being killed mid-write.
+     */
+    override fun onTimeout(startId: Int) {
+        Log.w(TAG, "Audio export reached the foreground service time limit; stopping cleanly")
+        isCancelledFlag = true
+        pendingSyntheses.values.forEach { it.complete(false) }
+        pendingSyntheses.clear()
+        exportJob?.cancel()
+        ExportStateHolder.update {
+            it.copy(
+                isRunning = false,
+                isCancelled = true,
+                errorMessage = "Export stopped: Android's background time limit was reached. " +
+                    "Re-run the export, or keep LexiVoice in the foreground."
+            )
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
+    }
+
     companion object {
+        private const val TAG = "AudioExportService"
         private const val NOTIFICATION_ID = 4201
         private const val NOTIFICATION_COMPLETE_ID = 4202
 
