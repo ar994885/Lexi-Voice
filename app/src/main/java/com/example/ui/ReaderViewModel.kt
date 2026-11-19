@@ -35,6 +35,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 
 data class ReaderUiState(
     val isLoading: Boolean = true,
@@ -44,6 +46,7 @@ data class ReaderUiState(
     val webChapterPayload: EpubParser.WebChapterPayload? = null,
     val jumpHighlightSentenceIndex: Int = -1,
     val initialPageOnLoad: Int = 0,
+    val initialAnchorOnLoad: String? = null,
     val errorMessage: String? = null
 )
 
@@ -339,7 +342,8 @@ pushSessionToTts(book, chapters, targetChapterIdx, payload)
 fun selectChapter(
 chapterIndex: Int,
 startPlayingFromSentence: Int? = null,
-jumpToEnd: Boolean = false
+jumpToEnd: Boolean = false,
+initialAnchor: String? = null
 ) {
 val current = _uiState.value
 val book = current.book ?: return
@@ -366,7 +370,8 @@ _uiState.value = _uiState.value.copy(
 currentChapterIndex = chapterIndex,
 webChapterPayload = payload,
 jumpHighlightSentenceIndex = -1,
-initialPageOnLoad = if (jumpToEnd) -1 else 0
+initialPageOnLoad = if (jumpToEnd) -1 else 0,
+initialAnchorOnLoad = initialAnchor
 )
 libraryRepo.updateReadingProgress(
 bookId = book.id,
@@ -404,7 +409,8 @@ bookId = current.book.id
 }
 _uiState.value = _uiState.value.copy(
 currentChapterIndex = ttsChapterIndex,
-webChapterPayload = payload
+webChapterPayload = payload,
+initialAnchorOnLoad = null
 )
 }
 }
@@ -426,7 +432,10 @@ visualRules = visualRules,
 bookId = book.id
 )
 }
-_uiState.value = _uiState.value.copy(webChapterPayload = payload)
+_uiState.value = _uiState.value.copy(
+webChapterPayload = payload,
+initialAnchorOnLoad = null
+)
 }
 }
 fun exportEditedEpub(
@@ -583,9 +592,94 @@ it.copy(
 fontFamily = ReaderFontFamily.CUSTOM,
 customFontName = fontNameWithoutExt
 )
-}
-}
-}
-}
-}
+                    }
+                }
+            }
+        }
+    }
+
+    fun navigateToInternalLink(rawHref: String, onSameChapterAnchor: (String) -> Unit = {}) {
+        val current = _uiState.value
+        val currentHref = current.chapters.getOrNull(current.currentChapterIndex)?.href
+        val (matchedIndex, anchorPart) = resolveInternalLinkTarget(
+            rawHref = rawHref,
+            currentChapterIndex = current.currentChapterIndex,
+            currentChapterHref = currentHref,
+            chapters = current.chapters
+        )
+        if (matchedIndex == -2) {
+            if (!anchorPart.isNullOrBlank()) {
+                onSameChapterAnchor(anchorPart)
+            }
+            return
+        }
+        if (matchedIndex >= 0 && matchedIndex != current.currentChapterIndex) {
+            selectChapter(
+                chapterIndex = matchedIndex,
+                initialAnchor = anchorPart?.takeIf { it.isNotBlank() }
+            )
+        } else if (matchedIndex == current.currentChapterIndex && !anchorPart.isNullOrBlank()) {
+            onSameChapterAnchor(anchorPart)
+        }
+    }
+
+    companion object {
+        /**
+         * Resolves an internal EPUB link (relative path, resolved ASSET_BASE_URL, or #anchor).
+         * Returns Pair(chapterIndex, anchorIdOrNull):
+         *  - chapterIndex == -2 when the link is a pure same-page `#anchor`
+         *  - chapterIndex == -1 when no matching spine chapter was found
+         */
+        internal fun resolveInternalLinkTarget(
+            rawHref: String,
+            currentChapterIndex: Int,
+            currentChapterHref: String?,
+            chapters: List<EpubChapterSummary>
+        ): Pair<Int, String?> {
+            val trimmed = rawHref.trim()
+            if (trimmed.isBlank()) return -1 to null
+
+            val withoutScheme = when {
+                trimmed.startsWith(EpubParser.ASSET_BASE_URL) -> trimmed.removePrefix(EpubParser.ASSET_BASE_URL)
+                trimmed.startsWith("about:blank#") -> "#" + trimmed.substringAfter("about:blank#")
+                else -> trimmed
+            }
+
+            val parts = withoutScheme.split("#", limit = 2)
+            val rawPath = parts.getOrNull(0).orEmpty().trim()
+            val rawAnchor = parts.getOrNull(1)?.trim().orEmpty()
+            val anchorPart = runCatching {
+                URLDecoder.decode(rawAnchor, StandardCharsets.UTF_8.name())
+            }.getOrDefault(rawAnchor).takeIf { it.isNotBlank() }
+
+            if (rawPath.isBlank()) {
+                return -2 to anchorPart
+            }
+
+            val decodedPath = runCatching {
+                URLDecoder.decode(rawPath, StandardCharsets.UTF_8.name())
+            }.getOrDefault(rawPath)
+            val curHref = currentChapterHref.orEmpty()
+            val currentDir = curHref.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
+
+            val resolvedPath = if (trimmed.startsWith(EpubParser.ASSET_BASE_URL) || decodedPath.startsWith("/")) {
+                EpubParser.normalizeZipPath(decodedPath)
+            } else {
+                EpubParser.normalizeZipPath("$currentDir$decodedPath")
+            }
+
+            val matchedIndex = chapters.indexOfFirst { ch ->
+                EpubParser.normalizeZipPath(ch.href).equals(resolvedPath, ignoreCase = true)
+            }.takeIf { it >= 0 } ?: chapters.indexOfFirst { ch ->
+                val normCh = EpubParser.normalizeZipPath(ch.href)
+                val normRaw = EpubParser.normalizeZipPath(decodedPath)
+                normCh.equals(normRaw, ignoreCase = true) ||
+                    normCh.endsWith("/$normRaw", ignoreCase = true) ||
+                    normRaw.endsWith("/$normCh", ignoreCase = true) ||
+                    File(normCh).name.equals(File(resolvedPath).name, ignoreCase = true)
+            }
+
+            return matchedIndex to anchorPart
+        }
+    }
 }

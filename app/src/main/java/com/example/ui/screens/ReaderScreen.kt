@@ -219,6 +219,7 @@ fun ReaderScreen(
     var targetPageTrigger by remember { mutableStateOf<Pair<Int, Long>?>(null) }
     var pageFlipTrigger by remember { mutableStateOf<Pair<Int, Long>?>(null) }
     var webActionTrigger by remember { mutableStateOf<Pair<String, Long>?>(null) }
+    var targetAnchorTrigger by remember { mutableStateOf<Pair<String, Long>?>(null) }
     var selectedWordForRule by remember(bookId, uiState.currentChapterIndex) { mutableStateOf("") }
     var selectedSentenceForAction by remember(bookId, uiState.currentChapterIndex) { mutableIntStateOf(-1) }
     var selectionRectInfo by remember(bookId, uiState.currentChapterIndex) { mutableStateOf(TextSelectionRectInfo()) }
@@ -495,9 +496,11 @@ fun ReaderScreen(
                                 }
                             },
                             initialPageOnLoad = uiState.initialPageOnLoad,
+                            initialAnchorOnLoad = uiState.initialAnchorOnLoad,
                             targetPageTrigger = targetPageTrigger,
                             pageFlipTrigger = pageFlipTrigger,
                             webActionTrigger = webActionTrigger,
+                            targetAnchorTrigger = targetAnchorTrigger,
                             onPageStateChanged = { cur, tot ->
                                 currentPage = cur
                                 totalPages = tot
@@ -511,6 +514,11 @@ fun ReaderScreen(
                             },
                             onExternalLinkClicked = { url ->
                                 pendingExternalUrl = url
+                            },
+                            onInternalLinkClicked = { rawHref ->
+                                viewModel.navigateToInternalLink(rawHref) { anchor ->
+                                    targetAnchorTrigger = anchor to System.nanoTime()
+                                }
                             },
                             modifier = Modifier.fillMaxSize()
                         )

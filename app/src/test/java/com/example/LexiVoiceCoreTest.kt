@@ -1394,6 +1394,77 @@ class LexiVoiceCoreTest {
         db2.close()
     }
 
+    @Test
+    fun `inline epub toc internal links resolve relative paths anchors and preserve center tap js`() {
+        val chapters = listOf(
+            com.example.epub.EpubChapterSummary(0, "Table of Contents", "OEBPS/Text/toc.xhtml"),
+            com.example.epub.EpubChapterSummary(1, "Chapter 1", "OEBPS/Text/ch01.xhtml"),
+            com.example.epub.EpubChapterSummary(2, "Chapter 2", "OEBPS/Text/Section%202/ch02.xhtml")
+        )
+
+        // 1. Resolved ASSET_BASE_URL link with fragment anchor
+        val assetLink = com.example.ui.ReaderViewModel.resolveInternalLinkTarget(
+            rawHref = "${EpubParser.ASSET_BASE_URL}OEBPS/Text/ch01.xhtml#heading_1",
+            currentChapterIndex = 0,
+            currentChapterHref = chapters[0].href,
+            chapters = chapters
+        )
+        assertEquals(1, assetLink.first)
+        assertEquals("heading_1", assetLink.second)
+
+        // 2. Relative ../ navigation across directories with URL-encoded segment
+        val relativeLink = com.example.ui.ReaderViewModel.resolveInternalLinkTarget(
+            rawHref = "../Text/Section%202/ch02.xhtml#sec-3",
+            currentChapterIndex = 1,
+            currentChapterHref = chapters[1].href,
+            chapters = chapters
+        )
+        assertEquals(2, relativeLink.first)
+        assertEquals("sec-3", relativeLink.second)
+
+        // 3. Pure same-page #anchor or about:blank#anchor
+        val pureAnchor = com.example.ui.ReaderViewModel.resolveInternalLinkTarget(
+            rawHref = "#footnote_4",
+            currentChapterIndex = 1,
+            currentChapterHref = chapters[1].href,
+            chapters = chapters
+        )
+        assertEquals(-2, pureAnchor.first)
+        assertEquals("footnote_4", pureAnchor.second)
+
+        val aboutBlankAnchor = com.example.ui.ReaderViewModel.resolveInternalLinkTarget(
+            rawHref = "about:blank#note_9",
+            currentChapterIndex = 1,
+            currentChapterHref = chapters[1].href,
+            chapters = chapters
+        )
+        assertEquals(-2, aboutBlankAnchor.first)
+        assertEquals("note_9", aboutBlankAnchor.second)
+
+        // 4. normalizeZipPath collapses dot segments cleanly
+        assertEquals("OEBPS/Text/ch02.xhtml", EpubParser.normalizeZipPath("OEBPS/Part1/../Text/./ch02.xhtml"))
+
+        // 5. Generated chapter HTML includes both internal link handler and center-tap overlay toggle JS
+        val tocHtml = """
+            <html><body>
+              <nav id="toc">
+                <a href="ch01.xhtml#start">Go to Chapter 1</a>
+                <a href="#local-note">Local Note</a>
+              </nav>
+              <p>Reader body text.</p>
+            </body></html>
+        """.trimIndent()
+        val payload = EpubParser.buildWebChapterPayload(
+            chapterIndex = 0,
+            chapterTitle = "Contents",
+            chapterHref = "OEBPS/Text/toc.xhtml",
+            rawHtml = tocHtml
+        )
+        assertTrue(payload.htmlWithSentenceSpans.contains("onInternalLinkClicked"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("lexiScrollToAnchor"))
+        assertTrue(payload.htmlWithSentenceSpans.contains("onCenterTapped"))
+    }
+
     private fun wrapAtom(type: String, payload: ByteArray): ByteArray {
         val sz = 8 + payload.size
         return ByteBuffer.allocate(sz).order(ByteOrder.BIG_ENDIAN).apply {

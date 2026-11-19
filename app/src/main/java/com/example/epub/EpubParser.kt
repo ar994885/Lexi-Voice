@@ -530,7 +530,7 @@ object EpubParser {
 
                       window.lexiScrollToAnchor = function(anchorId) {
                         if (!anchorId) return;
-                        var anchor = document.getElementById(anchorId) || document.querySelector('[name="' + anchorId + '"]');
+                        var anchor = document.getElementById(anchorId) || (document.getElementsByName ? document.getElementsByName(anchorId)[0] : null);
                         if (anchor) {
                           if (window.__lexiPagedMode) {
                             var pW = getPageWidth();
@@ -547,9 +547,10 @@ object EpubParser {
                         try {
                           var selText = window.getSelection ? window.getSelection().toString().trim() : '';
                           if (selText.length > 0) return;
-                          var link = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
-                          if (link) {
-                            var href = link.getAttribute('href') || '';
+                          var link = ev.target && ev.target.closest ? ev.target.closest('a') : null;
+                          if (link && (link.hasAttribute('href') || link.hasAttribute('xlink:href'))) {
+                            var href = (link.getAttribute('href') || link.getAttribute('xlink:href') || '').trim();
+                            var resolvedHref = (typeof link.href === 'string' && link.href.length > 0) ? link.href : href;
                             if (href.indexOf('http://') === 0 || href.indexOf('https://') === 0) {
                               if (href.indexOf('${ASSET_BASE_URL}') !== 0) {
                                 ev.preventDefault();
@@ -560,28 +561,19 @@ object EpubParser {
                                 return;
                               }
                             }
-                            if (href.indexOf('#') === 0 && href.length > 1) {
-                              var anchorId = href.substring(1);
-                              var anchor = document.getElementById(anchorId) || document.querySelector('[name="' + anchorId + '"]');
-                              if (anchor) {
-                                ev.preventDefault();
-                                ev.stopPropagation();
-                                if (window.__lexiPagedMode) {
-                                  var pW = getPageWidth();
-                                  var cS = window.scrollX || document.documentElement.scrollLeft || 0;
-                                  var aX = anchor.getBoundingClientRect().left + cS;
-                                  window.lexiGoToPage(Math.max(0, Math.floor(aX / pW)), false);
-                                } else {
-                                  anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                                }
-                                return;
+                            if (href.indexOf('#') === 0) {
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              if (href.length > 1) {
+                                window.lexiScrollToAnchor && window.lexiScrollToAnchor(href.substring(1));
                               }
+                              return;
                             }
                             if (href.length > 0 && href.indexOf('javascript:') !== 0) {
                               ev.preventDefault();
                               ev.stopPropagation();
                               if (window.LexiBridge && window.LexiBridge.onInternalLinkClicked) {
-                                window.LexiBridge.onInternalLinkClicked(href);
+                                window.LexiBridge.onInternalLinkClicked(resolvedHref || href);
                               }
                               return;
                             }
@@ -1292,6 +1284,8 @@ document.addEventListener('selectionchange', function() {
         }
         return stack.joinToString("/")
     }
+
+    fun normalizeZipPath(path: String): String = normalizePath(path)
 
     private fun decodeHref(raw: String): String {
         return runCatching { URLDecoder.decode(raw, StandardCharsets.UTF_8.name()) }.getOrDefault(raw)

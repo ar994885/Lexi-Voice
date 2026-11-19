@@ -48,6 +48,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -468,6 +469,7 @@ fun EpubWebView(
     onTextSelectedWithSentence: (String, Int) -> Unit = { _, _ -> },
     onTextSelectedWithRect: (TextSelectionRectInfo) -> Unit = {},
     initialPageOnLoad: Int = 0,
+    initialAnchorOnLoad: String? = null,
     targetPageTrigger: Pair<Int, Long>? = null,
     pageFlipTrigger: Pair<Int, Long>? = null,
     webActionTrigger: Pair<String, Long>? = null,
@@ -510,6 +512,7 @@ fun EpubWebView(
     val latestForceScroll by rememberUpdatedState(forceScrollMode)
     val latestActiveSentence by rememberUpdatedState(activeSentenceIndex)
     val latestInitialPage by rememberUpdatedState(initialPageOnLoad)
+    val latestInitialAnchor by rememberUpdatedState(initialAnchorOnLoad)
     val latestHasPrevChapter by rememberUpdatedState(hasPrevChapter)
     val latestHasNextChapter by rememberUpdatedState(hasNextChapter)
     val latestZipHolder by rememberUpdatedState(zipHolder)
@@ -654,13 +657,16 @@ wv.evaluateJavascript("window.lexiGoToPage && window.lexiGoToPage(${trigger.firs
             }
         }
     }
+    var lastHandledAnchorTs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(targetAnchorTrigger, pageLoadedKey, isLifecycleResumed) {
         val trigger = targetAnchorTrigger ?: return@LaunchedEffect
+        if (trigger.second == lastHandledAnchorTs) return@LaunchedEffect
         val wv = webViewRef ?: return@LaunchedEffect
-        if (isLifecycleResumed && !wv.isDestroyedOrDead) {
+        if (isLifecycleResumed && pageLoadedKey == contentKey && !wv.isDestroyedOrDead) {
+            lastHandledAnchorTs = trigger.second
             runCatching {
                 wv.evaluateJavascript(
-                    "window.lexiScrollToAnchor && window.lexiScrollToAnchor('${trigger.first}');",
+                    "window.lexiScrollToAnchor && window.lexiScrollToAnchor(${JSONObject.quote(trigger.first)});",
                     null
                 )
             }
@@ -808,7 +814,7 @@ if ((url.startsWith("http://") || url.startsWith("https://")) && !url.startsWith
 post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
 return true
 }
-if (url.startsWith(EpubParser.ASSET_BASE_URL) || url.startsWith("content://") || url.startsWith("file://")) {
+if (url.startsWith(EpubParser.ASSET_BASE_URL) || url.startsWith("content://") || url.startsWith("file://") || url.startsWith("about:blank#") || url.startsWith("#")) {
 post { if (!this@apply.isDestroyedOrDead) latestOnInternalLink(url) }
 return true
 }
@@ -904,7 +910,11 @@ view?.evaluateJavascript(buildThemeInjectionScript(settingsNow, latestForceScrol
 view?.evaluateJavascript(buildUserCustomCssScript(settingsNow.customCss), null)
 view?.evaluateJavascript(buildHighlightsInjectionScript(latestHighlights), null)
 val initPage = latestInitialPage
+val initAnchor = latestInitialAnchor
 val activeIdx = latestActiveSentence
+val anchorJs = if (!initAnchor.isNullOrBlank()) {
+    "requestAnimationFrame(function(){ requestAnimationFrame(function(){ setTimeout(function(){ window.lexiScrollToAnchor && window.lexiScrollToAnchor(${JSONObject.quote(initAnchor)}); }, 40); }); });"
+} else ""
 view?.evaluateJavascript(
 """
 (function(){
@@ -912,6 +922,7 @@ window.__lexiPagedMode = ${if (isPagedNow) "true" else "false"};
 if (window.lexiRecalcPagination) {
 window.lexiRecalcPagination($initPage);
 }
+$anchorJs
 ${if (activeIdx >= 0) "setTimeout(function(){ window.lexiHighlightSentence && window.lexiHighlightSentence($activeIdx, true); }, 60);" else ""}
 })();
 """.trimIndent(),
