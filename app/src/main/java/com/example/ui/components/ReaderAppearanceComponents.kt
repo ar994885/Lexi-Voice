@@ -1052,7 +1052,7 @@ fun TextSelectionActionBar(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                     modifier = Modifier.testTag("reader_add_rule_from_selection_button")
                 ) {
-                    Text("Add Rule", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                    Text("Edit", style = MaterialTheme.typography.labelMedium, maxLines = 1)
                 }
             }
 
