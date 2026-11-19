@@ -171,16 +171,10 @@ fun LibraryScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val hasAllFilesAccess = remember(resumeTick) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
-        } else {
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
-        }
-    }
+    // Device scanning no longer depends on All Files Access: EPUBs are picked up
+    // through MediaStore where the platform exposes them, audiobooks through the
+    // audio media permission, and everything else through user-granted SAF folders.
+    val canScanDevice = true
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -302,7 +296,7 @@ fun LibraryScreen(
                 ) {
                     Icon(
                         Icons.Default.Sync,
-                        contentDescription = if (hasAllFilesAccess) "Scan Device for EPUBs" else "Scan & Sync Books"
+                        contentDescription = if (canScanDevice) "Scan device for books" else "Scan and sync books"
                     )
                 }
 

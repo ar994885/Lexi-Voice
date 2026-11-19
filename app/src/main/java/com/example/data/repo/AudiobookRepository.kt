@@ -1,11 +1,14 @@
 package com.example.data.repo
 
+import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
 import com.example.audiobook.AudiobookChapterMeta
 import com.example.audiobook.BookSyncMap
@@ -29,6 +32,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
+import java.util.Locale
 
 class AudiobookRepository(
     private val context: Context,
@@ -223,6 +227,10 @@ class AudiobookRepository(
         val scannedSafTrees = HashSet<String>()
         val discoveredFolderKeys = HashSet<String>()
 
+        // Automatic whole-device discovery through MediaStore first. Audio is
+        // media, so this needs no restricted permission and no folder picking.
+        scanMediaStoreForAudiobooks(discoveredFolderKeys)
+
         for (folder in watched) {
             if (folder.isDirectPath) {
                 scanDirectDirectoryForAudiobooks(File(folder.uriOrPath), discoveredFolderKeys)
@@ -256,6 +264,139 @@ class AudiobookRepository(
 
 
     suspend fun scanFoldersForM4b() = scanFoldersForAudiobooks()
+
+    /**
+     * Automatic audiobook discovery through MediaStore.
+     *
+     * Audio is media, so on API 33+ READ_MEDIA_AUDIO exposes every .m4b and .mp3
+     * on the device, and on API <= 32 READ_EXTERNAL_STORAGE does the same. No
+     * folder picking and no All Files Access is involved. Results are stored as
+     * content:// URIs with isDirectPath = false so every later read goes through
+     * ContentResolver.
+     *
+     * This complements, rather than replaces, the SAF folders below: SAF remains
+     * the route for custom and SD-card directories the user grants explicitly,
+     * and anything already indexed by URI is skipped, so the two paths never
+     * produce duplicate rows.
+     */
+    private suspend fun scanMediaStoreForAudiobooks(discoveredFolderKeys: MutableSet<String>) {
+        val candidates = linkedMapOf<String, Pair<Uri, String>>() // uriString -> (uri, displayName)
+
+        collectMediaStoreAudio(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, candidates)
+        // .m4b is audio/mp4 and normally lands in MediaStore.Audio, but some
+        // vendor indexers file it as a generic document, so sweep Files too.
+        collectMediaStoreAudio(MediaStore.Files.getContentUri("external"), candidates)
+
+        if (candidates.isEmpty()) return
+
+        for ((key, value) in candidates) {
+            val (uri, displayName) = value
+            if (audiobookDao.getAudiobookByUri(key) != null) continue
+
+            val lower = displayName.lowercase(Locale.ROOT)
+            val entity = when {
+                lower.endsWith(".m4b") -> mediaStoreM4bEntity(uri, displayName, key)
+                lower.endsWith(".mp3") -> mediaStoreMp3Entity(uri, displayName, key)
+                else -> null
+            } ?: continue
+
+            audiobookDao.upsertAudiobookPreservingProgress(entity)
+            entity.folderUri?.let { discoveredFolderKeys.add(it) }
+        }
+    }
+
+    /**
+     * Reads one MediaStore collection and records every .m4b / .mp3 it exposes.
+     * RELATIVE_PATH is used for grouping where the platform provides it.
+     */
+    private fun collectMediaStoreAudio(
+        collection: Uri,
+        out: MutableMap<String, Pair<Uri, String>>
+    ) {
+        val hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val pathColumn = if (hasRelativePath) {
+            MediaStore.MediaColumns.RELATIVE_PATH
+        } else {
+            @Suppress("DEPRECATION")
+            MediaStore.MediaColumns.DATA
+        }
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            pathColumn
+        )
+        val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? OR " +
+            "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
+        val selectionArgs = arrayOf("%.m4b", "%.mp3")
+
+        runCatching {
+            context.contentResolver
+                .query(collection, projection, selection, selectionArgs, null)
+                ?.use { cursor ->
+                    val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                    val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val pathIdx = cursor.getColumnIndex(pathColumn)
+                    while (cursor.moveToNext()) {
+                        val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
+                        val name = if (nameIdx >= 0) cursor.getString(nameIdx).orEmpty() else ""
+                        val lower = name.lowercase(Locale.ROOT)
+                        if (!lower.endsWith(".m4b") && !lower.endsWith(".mp3")) continue
+                        val uri = ContentUris.withAppendedId(collection, id)
+                        out[uri.toString()] = uri to name
+                    }
+                }
+        }
+    }
+
+    private fun mediaStoreM4bEntity(uri: Uri, displayName: String, key: String): AudiobookEntity? {
+        val fallbackTitle = displayName.substringBeforeLast('.')
+        val parsed = inspectM4bFromUri(uri, fallbackTitle, key)
+        return AudiobookEntity(
+            fileUri = key,
+            isDirectPath = false,
+            title = parsed.title,
+            author = parsed.author,
+            narrator = parsed.narrator,
+            year = parsed.year,
+            genre = parsed.genre,
+            coverPath = parsed.coverPath,
+            durationMs = parsed.durationMs,
+            chapterCount = parsed.chapters.size.coerceAtLeast(1),
+            chaptersJson = SyncAlignmentSerializer.encodeChapters(parsed.chapters),
+            isFolderAudiobook = false,
+            folderUri = MEDIASTORE_AUDIO_FOLDER_PREFIX + (uri.lastPathSegment ?: "Device audio"),
+            chapterFilesJson = "[]",
+            addedAt = System.currentTimeMillis()
+        )
+    }
+
+    private fun mediaStoreMp3Entity(uri: Uri, displayName: String, key: String): AudiobookEntity? {
+        val fallbackTitle = displayName.substringBeforeLast('.')
+        val parsed = inspectMp3FromUri(uri, fallbackTitle)
+        val coverPath = parsed.coverBytes?.let { saveCoverBytes(it, key) }
+        val chapter = AudiobookChapterMeta(
+            index = 0,
+            title = parsed.title,
+            startMs = 0L,
+            endMs = parsed.durationMs
+        )
+        return AudiobookEntity(
+            fileUri = key,
+            isDirectPath = false,
+            title = parsed.title,
+            author = parsed.artist,
+            narrator = "LexiVoice TTS",
+            genre = parsed.album.ifBlank { "Audiobook" },
+            coverPath = coverPath,
+            durationMs = parsed.durationMs,
+            chapterCount = 1,
+            chaptersJson = SyncAlignmentSerializer.encodeChapters(listOf(chapter)),
+            isFolderAudiobook = false,
+            folderUri = MEDIASTORE_AUDIO_FOLDER_PREFIX + (uri.lastPathSegment ?: "Device audio"),
+            chapterFilesJson = "[]",
+            addedAt = System.currentTimeMillis()
+        )
+    }
 
     private suspend fun scanDirectDirectoryForAudiobooks(
         root: File,
@@ -717,4 +858,10 @@ class AudiobookRepository(
         val bytes = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
         return bytes.joinToString("") { "%02x".format(it) }.take(32)
     }
+
+    private companion object {
+        /** Folder key prefix used for audiobooks discovered through MediaStore. */
+        const val MEDIASTORE_AUDIO_FOLDER_PREFIX = "mediastore-audio://"
+    }
+
 }

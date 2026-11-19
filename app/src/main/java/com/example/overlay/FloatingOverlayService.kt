@@ -1,9 +1,12 @@
 package com.example.overlay
 
 import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.PorterDuff
@@ -22,6 +25,9 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import com.example.LexiVoiceApplication
 import com.example.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,14 +70,22 @@ class FloatingOverlayService : Service() {
         when (intent?.action) {
             ACTION_HIDE -> {
                 removeSystemOverlay()
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_SHOW, null -> {
+                // The overlay permission can be revoked at any time from Settings.
+                // Bail out cleanly rather than crashing on addView().
                 if (!Settings.canDrawOverlays(this)) {
+                    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
                     stopSelf()
                     return START_NOT_STICKY
                 }
+                // Foreground from the first moment: as a plain started service this
+                // was stopped within minutes once the app left the foreground, which
+                // is exactly when the overlay is needed.
+                startAsForeground()
                 if (overlayView == null) {
                     createCompactSystemOverlayView()
                 }
@@ -81,12 +95,62 @@ class FloatingOverlayService : Service() {
         return START_NOT_STICKY
     }
 
+    /**
+     * Promotes the service to foreground so the overlay survives while the user
+     * is in another app or the screen is off.
+     *
+     * specialUse is the correct foreground service type for a persistent overlay
+     * on API 34+, and it is declared in the manifest together with its subtype
+     * property. The notification is minimal-importance, ongoing, and carries a
+     * single "Stop overlay" action.
+     */
+    private fun startAsForeground() {
+        val notification = buildOverlayNotification()
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        } else {
+            0
+        }
+        runCatching {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+        }.onFailure {
+            // Some OEM ROMs reject the type; fall back to an untyped foreground
+            // service rather than losing the overlay entirely.
+            runCatching { startForeground(NOTIFICATION_ID, notification) }
+        }
+    }
+
+    private fun buildOverlayNotification(): Notification {
+        val stopIntent = Intent(this, FloatingOverlayService::class.java).setAction(ACTION_HIDE)
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            0,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return NotificationCompat.Builder(this, LexiVoiceApplication.CHANNEL_OVERLAY)
+            .setSmallIcon(R.drawable.ic_speaker_wave)
+            .setContentTitle("LexiVoice overlay active")
+            .setContentText("Your floating reader is available over other apps")
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setOngoing(true)
+            .setSilent(true)
+            .setShowWhen(false)
+            .addAction(0, "Stop overlay", stopPendingIntent)
+            .build()
+    }
+
     private fun startObservingState() {
         if (collectorJob?.isActive == true) return
         collectorJob = serviceScope.launch {
             FloatingOverlayController.state.collect { st ->
                 if (!st.isVisible || !Settings.canDrawOverlays(this@FloatingOverlayService)) {
                     removeSystemOverlay()
+                    ServiceCompat.stopForeground(
+                        this@FloatingOverlayService,
+                        ServiceCompat.STOP_FOREGROUND_REMOVE
+                    )
                     stopSelf()
                 } else {
                     if (overlayView == null) {
@@ -427,11 +491,14 @@ class FloatingOverlayService : Service() {
     override fun onDestroy() {
         collectorJob?.cancel()
         removeSystemOverlay()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
         super.onDestroy()
     }
 
     companion object {
+        private const val NOTIFICATION_ID = 4501
+
         const val ACTION_SHOW = "com.example.overlay.SHOW"
         const val ACTION_HIDE = "com.example.overlay.HIDE"
     }

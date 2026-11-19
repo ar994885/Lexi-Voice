@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.DocumentsContract
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.documentfile.provider.DocumentFile
@@ -321,32 +322,58 @@ class M4bCompileService : Service() {
         }.getOrNull()
     }
 
+    /**
+     * Compiles into a `.part` staging document and promotes it to the final name
+     * only after the copy succeeds, so an interrupted compile never leaves a
+     * truncated .m4b in the user's folder. The previous export is replaced only
+     * once the new one is complete.
+     */
     private fun writeToSafDirectoryUri(
         dirUri: Uri,
         sourceFile: File,
         mimeType: String,
         displayName: String
     ): Uri? {
-        findChildSafFileUri(dirUri, displayName)?.let { oldUri ->
-            runCatching { DocumentsContract.deleteDocument(contentResolver, oldUri) }
+        val stagingName = "$displayName.part"
+        findChildSafFileUri(dirUri, stagingName)?.let { stale ->
+            runCatching { DocumentsContract.deleteDocument(contentResolver, stale) }
         }
-        val createdUri = if (DocumentsContract.isDocumentUri(applicationContext, dirUri)) {
+
+        val stagingUri = if (DocumentsContract.isDocumentUri(applicationContext, dirUri)) {
             runCatching {
-                DocumentsContract.createDocument(contentResolver, dirUri, mimeType, displayName)
+                DocumentsContract.createDocument(contentResolver, dirUri, mimeType, stagingName)
             }.getOrNull()
         } else {
             DocumentFile.fromTreeUri(applicationContext, dirUri)?.let { treeDoc ->
-                treeDoc.findFile(displayName)?.delete()
-                treeDoc.createFile(mimeType, displayName)?.uri
+                treeDoc.findFile(stagingName)?.delete()
+                treeDoc.createFile(mimeType, stagingName)?.uri
             }
         } ?: return null
 
-        contentResolver.openOutputStream(createdUri)?.use { out ->
-            FileInputStream(sourceFile).use { input ->
-                input.copyTo(out, bufferSize = 32 * 1024)
-            }
+        val copied = runCatching {
+            contentResolver.openOutputStream(stagingUri)?.use { out ->
+                FileInputStream(sourceFile).use { input ->
+                    input.copyTo(out, bufferSize = 32 * 1024)
+                }
+                out.flush()
+            } != null
+        }.getOrDefault(false)
+
+        if (!copied) {
+            runCatching { DocumentsContract.deleteDocument(contentResolver, stagingUri) }
+            return null
         }
-        return createdUri
+
+        findChildSafFileUri(dirUri, displayName)?.let { oldUri ->
+            runCatching { DocumentsContract.deleteDocument(contentResolver, oldUri) }
+        }
+        val promoted = runCatching {
+            DocumentsContract.renameDocument(contentResolver, stagingUri, displayName)
+        }.getOrNull()
+        if (promoted != null) return promoted
+
+        runCatching { DocumentsContract.deleteDocument(contentResolver, stagingUri) }
+        return null
     }
 
     private fun resolveCoverBytes(request: M4bCompileRequest): Pair<ByteArray?, String?> {
@@ -466,7 +493,26 @@ class M4bCompileService : Service() {
         super.onDestroy()
     }
 
+    /**
+     * Android 15+ foreground service time limit. Compilation writes through the
+     * staging path above, so stopping here cannot leave a corrupt .m4b behind.
+     */
+    override fun onTimeout(startId: Int) {
+        Log.w(TAG, "M4B compile reached the foreground service time limit; stopping cleanly")
+        compileJob?.cancel()
+        M4bCompileStateHolder.update {
+            it.copy(
+                isRunning = false,
+                errorMessage = "Compilation stopped: Android's background time limit was reached. " +
+                    "Re-run the compile, or keep LexiVoice in the foreground."
+            )
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
+    }
+
     companion object {
+        private const val TAG = "M4bCompileService"
         private const val NOTIFICATION_ID = 4401
         private const val NOTIFICATION_DONE_ID = 4402
 

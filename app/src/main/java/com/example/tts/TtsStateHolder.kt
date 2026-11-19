@@ -68,7 +68,15 @@ data class TtsPlaybackState(
     val sleepRemainingMs: Long = 0L,
     val floatingPopupVisible: Boolean = false,
     val floatingPopupTemporarilyHidden: Boolean = false,
-    val statusMessage: String = ""
+    val statusMessage: String = "",
+    /**
+     * Non-blank when the speech engine could not play — for example no voice
+     * data is installed for the selected language, or synthesis failed. The UI
+     * shows this as a banner with a one-tap route to install voice data.
+     */
+    val ttsErrorMessage: String = "",
+    /** True when [ttsErrorMessage] means the language has no installed voice data. */
+    val missingVoiceData: Boolean = false
 )
 
 data class TtsSessionContent(

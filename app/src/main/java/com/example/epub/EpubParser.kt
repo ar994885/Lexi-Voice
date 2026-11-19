@@ -228,6 +228,19 @@ object EpubParser {
         val doc = Jsoup.parse(rawHtml)
         doc.outputSettings().prettyPrint(false)
 
+        // EPUB is untrusted input and the format permits scripted XHTML. Strip
+        // everything executable from the book's markup before it is serialised
+        // into the reader page, so the only script that runs in that page is
+        // Lexi-Voice's own bridge below.
+        doc.select("script, noscript, iframe, object, embed").remove()
+        doc.allElements.forEach { el ->
+            val unsafe = el.attributes().asList().filter { attr ->
+                attr.key.startsWith("on", ignoreCase = true) ||
+                    attr.value.trim().startsWith("javascript:", ignoreCase = true)
+            }
+            unsafe.forEach { el.removeAttr(it.key) }
+        }
+
         val chapterDir = chapterHref.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
         val baseUrl = "$ASSET_BASE_URL$chapterDir"
 

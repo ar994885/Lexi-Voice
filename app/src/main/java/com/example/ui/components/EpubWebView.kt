@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.view.ActionMode
@@ -355,6 +356,23 @@ private fun destroyWebViewSafely(wv: LexiBookWebView) {
     }
 }
 
+/**
+ * Gatekeeper for every URL that leaves the reader.
+ *
+ * EPUB content is untrusted input: the format permits scripted XHTML, so a
+ * crafted or careless book can run JavaScript in the same page as [LexiWebJsBridge]
+ * and call [LexiWebJsBridge.onExternalLinkClicked]. Only http and https are
+ * allowed through, which rules out intent://, file://, content://, javascript:
+ * and arbitrary custom schemes reaching an Intent.ACTION_VIEW.
+ */
+internal fun isSafeExternalUrl(url: String): Boolean {
+    val trimmed = url.trim()
+    if (trimmed.isEmpty()) return false
+    val scheme = runCatching { Uri.parse(trimmed).scheme }.getOrNull()
+        ?.lowercase(Locale.ROOT) ?: return false
+    return scheme == "http" || scheme == "https"
+}
+
 private class LexiWebJsBridge(
     private val isAliveProvider: () -> Boolean,
     private val enableSentenceTapProvider: () -> Boolean,
@@ -441,6 +459,8 @@ private class LexiWebJsBridge(
     @JavascriptInterface
     fun onExternalLinkClicked(url: String) {
         if (!isAliveProvider()) return
+        // Reject anything that is not plain web content before it reaches the host.
+        if (!isSafeExternalUrl(url)) return
         onExternalLinkClickedCallback(url)
     }
     @JavascriptInterface
@@ -728,6 +748,12 @@ useWideViewPort = false
 loadWithOverviewMode = false
 allowFileAccess = false
 allowContentAccess = false
+// Both default to false, but they are set explicitly so a later refactor cannot
+// silently re-open file:// access to the reader's own sandbox.
+@Suppress("DEPRECATION")
+allowFileAccessFromFileURLs = false
+@Suppress("DEPRECATION")
+allowUniversalAccessFromFileURLs = false
 mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 if (WebViewFeature.isFeatureSupported(WebViewFeature.ALGORITHMIC_DARKENING)) {
     WebSettingsCompat.setAlgorithmicDarkeningAllowed(this, false)
@@ -810,7 +836,9 @@ request: WebResourceRequest?
 ): Boolean {
 if ((view as? LexiBookWebView)?.isDestroyedOrDead == true) return true
 val url = request?.url?.toString().orEmpty()
-if ((url.startsWith("http://") || url.startsWith("https://")) && !url.startsWith(EpubParser.ASSET_BASE_URL)) {
+// Only http(s) may be handed to the host. Everything else — intent://,
+// file://, content://, javascript:, custom schemes — is swallowed here.
+if (!url.startsWith(EpubParser.ASSET_BASE_URL) && isSafeExternalUrl(url)) {
 post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
 return true
 }

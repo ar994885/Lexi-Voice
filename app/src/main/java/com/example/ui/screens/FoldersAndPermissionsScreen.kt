@@ -94,15 +94,15 @@ fun FoldersAndPermissionsScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val hasAllFilesAccess = remember(resumeTick) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
-        } else {
+    // A raw filesystem path is only usable on API <= 32 with the legacy read
+    // permission; on newer releases SAF is the supported route, so the direct-path
+    // option is offered only when it can actually work.
+    val canUseDirectPath = remember(resumeTick) {
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.READ_EXTERNAL_STORAGE
             ) == PackageManager.PERMISSION_GRANTED
-        }
     }
 
     val safFolderLauncher = rememberLauncherForActivityResult(
@@ -166,7 +166,7 @@ fun FoldersAndPermissionsScreen(
                     }
                     OutlinedButton(
                         onClick = {
-                            if (hasAllFilesAccess) {
+                            if (canUseDirectPath) {
                                 showDirectPathDialog = true
                             } else {
                                 showNeedPermissionDialog = true
