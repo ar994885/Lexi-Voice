@@ -487,7 +487,9 @@ fun ReaderScreen(
                             },
                             onTextSelectedWithRect = { rectInfo ->
                                 selectionRectInfo = rectInfo
-                                if (rectInfo.text.isBlank()) {
+                                if (rectInfo.text.isNotBlank()) {
+                                    selectedWordForRule = rectInfo.text.trim()
+                                } else {
                                     selectedWordForRule = ""
                                     selectedSentenceForAction = -1
                                 }
