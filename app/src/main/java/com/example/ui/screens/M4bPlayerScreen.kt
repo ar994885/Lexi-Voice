@@ -110,6 +110,7 @@ import com.example.R
 import com.example.audiobook.M4bPlaybackService
 import com.example.audiobook.M4bPlaybackState
 import com.example.audiobook.M4bPlayerStateHolder
+import com.example.audiobook.SyncReconciler
 import com.example.data.prefs.ReaderSettings
 import com.example.epub.EpubChapterSummary
 import com.example.epub.EpubParser
@@ -225,76 +226,59 @@ fun M4bPlayerScreen(
     val rawChPosMs = (playerState.currentPositionMs - chStartMs).coerceIn(0L, chDurMs)
     val displayChPosMs = if (isSeeking) seekSliderPos.toLong().coerceIn(0L, chDurMs) else rawChPosMs
 
+    // The chapter's spoken segments, in spoken order.
+    val chapterSyncSegments = remember(
+        loadedWebPayload?.chapterIndex,
+        playerState.activeSyncChapterIndex
+    ) {
+        val payload = loadedWebPayload
+        if (payload == null || payload.chapterIndex != playerState.activeSyncChapterIndex) {
+            emptyList()
+        } else {
+            M4bPlayerStateHolder.syncSegments.filter { it.chapterIndex == payload.chapterIndex }
+        }
+    }
+
+    // Map each spoken segment onto the sentence the parser produces now. Computed
+    // once per chapter rather than per frame, and independent of playback direction,
+    // so seeking backwards cannot lose the alignment the way the old forward-only
+    // cursor did.
+    val segmentToSentence = remember(loadedWebPayload?.chapterIndex, chapterSyncSegments) {
+        val payload = loadedWebPayload
+        if (payload == null || payload.sentences.isEmpty() || chapterSyncSegments.isEmpty()) {
+            IntArray(0)
+        } else {
+            SyncReconciler.align(
+                segmentTexts = chapterSyncSegments.map { it.text },
+                sentenceTexts = payload.sentences.map { it.text }
+            )
+        }
+    }
+
     val activeHighlightIdx = remember(
         loadedWebPayload?.chapterIndex,
-        loadedWebPayload?.sentences,
-        playerState.activeSyncChapterIndex,
-        playerState.activeSyncSentenceIndex,
-        playerState.activeSyncText,
-        playerState.currentPositionMs
+        segmentToSentence,
+        playerState.activeSyncSentenceIndex
     ) {
         val payload = loadedWebPayload ?: return@remember -1
         if (payload.chapterIndex != playerState.activeSyncChapterIndex || payload.sentences.isEmpty()) {
-            -1
-        } else {
-            fun norm(s: String) = s.replace(Regex("\\s+"), " ").trim()
-            val spoken = norm(playerState.activeSyncText)
-
-            val directMatch = payload.sentences.getOrNull(playerState.activeSyncSentenceIndex)
-            if (directMatch != null && spoken.isNotEmpty() &&
-                norm(directMatch.text).contains(spoken, ignoreCase = true)
-            ) {
-                lastMatchedGlobalIndex = directMatch.globalIndex
-                directMatch.globalIndex
-            } else {
-                val chapterSegs = M4bPlayerStateHolder.syncSegments.filter {
-                    it.chapterIndex == payload.chapterIndex
-                }
-                val segIdx = chapterSegs.indexOfFirst {
-                    playerState.currentPositionMs in it.startMs..it.endMs
-                }.takeIf { it >= 0 } ?: chapterSegs.indexOfFirst {
-                    it.sentenceIndex == playerState.activeSyncSentenceIndex
-                }
-
-                val contextPhrase = if (segIdx >= 0) {
-                    listOfNotNull(
-                        chapterSegs.getOrNull(segIdx - 1)?.text,
-                        chapterSegs.getOrNull(segIdx)?.text,
-                        chapterSegs.getOrNull(segIdx + 1)?.text
-                    ).joinToString(" ") { norm(it) }.trim()
-                } else {
-                    spoken
-                }
-
-                val startPos = if (lastMatchedGlobalIndex >= 0) {
-                    payload.sentences.indexOfFirst { it.globalIndex >= lastMatchedGlobalIndex }.coerceAtLeast(0)
-                } else {
-                    0
-                }
-                val forwardWindow = payload.sentences.drop(startPos).take(12)
-
-                val matched = forwardWindow.firstOrNull { s ->
-                    val sNorm = norm(s.text)
-                    contextPhrase.length >= 6 && (sNorm.contains(contextPhrase, ignoreCase = true) ||
-                        contextPhrase.contains(sNorm, ignoreCase = true))
-                } ?: forwardWindow.firstOrNull { s ->
-                    val sNorm = norm(s.text)
-                    spoken.isNotEmpty() && (sNorm.contains(spoken, ignoreCase = true) ||
-                        spoken.contains(sNorm, ignoreCase = true))
-                } ?: payload.sentences.firstOrNull { s ->
-                    val sNorm = norm(s.text)
-                    contextPhrase.length >= 6 && (sNorm.contains(contextPhrase, ignoreCase = true) ||
-                        contextPhrase.contains(sNorm, ignoreCase = true))
-                } ?: directMatch
-
-                val resolved = matched?.globalIndex ?: playerState.activeSyncSentenceIndex
-                if (matched != null) {
-                    lastMatchedGlobalIndex = resolved
-                }
-                resolved
-            }
+            return@remember -1
         }
+        val segmentPos = chapterSyncSegments.indexOfFirst {
+            it.sentenceIndex == playerState.activeSyncSentenceIndex
+        }
+        val sentencePos = if (segmentPos >= 0) {
+            segmentToSentence.getOrElse(segmentPos) { -1 }
+        } else {
+            -1
+        }
+        // Fall back to the raw index so behaviour degrades to the previous
+        // behaviour rather than highlighting nothing.
+        payload.sentences.getOrNull(sentencePos)?.globalIndex
+            ?: payload.sentences.getOrNull(playerState.activeSyncSentenceIndex)?.globalIndex
+            ?: playerState.activeSyncSentenceIndex
     }
+
 
     val activeParagraphIdx = remember(loadedWebPayload?.paragraphs, activeHighlightIdx) {
         val payload = loadedWebPayload ?: return@remember -1
