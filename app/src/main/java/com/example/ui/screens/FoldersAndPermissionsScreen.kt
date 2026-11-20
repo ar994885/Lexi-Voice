@@ -98,11 +98,12 @@ fun FoldersAndPermissionsScreen(
     // permission; on newer releases SAF is the supported route, so the direct-path
     // option is offered only when it can actually work.
     val canUseDirectPath = remember(resumeTick) {
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED
+        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) ||
+            (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED)
     }
 
     val safFolderLauncher = rememberLauncherForActivityResult(

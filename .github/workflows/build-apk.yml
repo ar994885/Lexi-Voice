@@ -1,4 +1,4 @@
-name: Build & Publish Signed Release APK
+name: Build & Publish Signed Release APKs
 
 on:
   push:
@@ -16,7 +16,7 @@ permissions:
 env:
   # Bump this on each release. The build falls back to it when the Gradle
   # property is not supplied, so local and CI builds stay in step.
-  VERSION_NAME: '0.0.3'
+  VERSION_NAME: '0.0.4'
 
 jobs:
   build:
@@ -50,27 +50,49 @@ jobs:
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
 
-      - name: Build Signed Release APK
+      # Both editions are built and both are lint-checked, so a policy or
+      # resource problem fails here rather than at upload time.
+      #   standard -> LexiVoice      (no All Files Access, Play-compliant)
+      #   pro      -> LexiVoice Pro  (MANAGE_EXTERNAL_STORAGE, sideload)
+      - name: Build Signed Release APKs (both editions)
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/release.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          gradle assembleRelease \
+          gradle assembleStandardRelease assembleProRelease \
+                 lintVitalStandardRelease lintVitalProRelease \
             -Plexivoice.versionCode=${{ steps.ver.outputs.code }} \
             -Plexivoice.versionName=${{ steps.ver.outputs.name }}
 
-      # Name the artifact from the real version so no two downloads collide and
-      # the filename always matches the manifest.
-      - name: Rename APK
+      # Name each artifact from its real edition and version, so the download
+      # filename always identifies which app it is and which build it came from.
+      - name: Rename APKs
         run: |
-          cp app/build/outputs/apk/release/*.apk \
-             "LexiVoice-Release-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk"
+          cp app/build/outputs/apk/standard/release/app-standard-release.apk \
+             "LexiVoice-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk"
+          cp app/build/outputs/apk/pro/release/app-pro-release.apk \
+             "LexiVoice-Pro-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk"
+          ls -lh LexiVoice*.apk
 
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}
           name: LexiVoice v${{ steps.ver.outputs.name }} (${{ steps.ver.outputs.code }})
-          files: LexiVoice-Release-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk
+          body: |
+            ## LexiVoice ${{ steps.ver.outputs.name }} (${{ steps.ver.outputs.code }})
+
+            Two editions, same codebase:
+
+            | APK | Edition | Notes |
+            | --- | --- | --- |
+            | `LexiVoice-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk` | LexiVoice | No All Files Access. Play-compliant as-is. |
+            | `LexiVoice-Pro-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk` | LexiVoice Pro | Adds All Files Access for automatic whole-device EPUB discovery. |
+
+            The two editions have different application IDs, so they install side by
+            side — and keep separate libraries and reading progress.
+          files: |
+            LexiVoice-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk
+            LexiVoice-Pro-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}.apk
           generate_release_notes: true

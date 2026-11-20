@@ -16,6 +16,7 @@ import com.example.audiobook.Mp3ChapterFileMeta
 import com.example.audiobook.SyncAlignmentSegment
 import com.example.audiobook.SyncAlignmentSerializer
 import com.example.audiobook.SyncMapChapterEntry
+import com.example.audiobook.SyncMapMerger
 import com.example.data.db.AudiobookDao
 import com.example.data.db.AudiobookEntity
 import com.example.data.db.FolderDao
@@ -412,7 +413,7 @@ class AudiobookRepository(
             val children = dir.listFiles() ?: continue
 
             val mp3Files = mutableListOf<File>()
-            var syncMapFile: File? = null
+            val syncMapFiles = mutableListOf<File>()
 
             for (child in children) {
                 if (child.isDirectory) {
@@ -441,14 +442,27 @@ class AudiobookRepository(
                             }
                         }
                         child.name.endsWith(".mp3", ignoreCase = true) -> mp3Files.add(child)
-                        child.name.equals("sync_map.json", ignoreCase = true) -> syncMapFile = child
+                        isSyncMapFileName(child.name) -> syncMapFiles.add(child)
                     }
                 }
             }
 
             if (mp3Files.isNotEmpty()) {
-                val existingSync = syncMapFile?.let {
-                    runCatching { SyncAlignmentSerializer.decodeBookSyncMap(it.readText()) }.getOrNull()
+                // A folder can hold several sync maps (sync_map.json, sync_map (1).json,
+                // sync_map_2.json ...) after recordings move between devices. Merge them
+                // so chapters outside the first file are not silently invisible.
+                val decodedSyncs = syncMapFiles.mapNotNull { f ->
+                    runCatching { SyncAlignmentSerializer.decodeBookSyncMap(f.readText()) }
+                        .getOrNull()?.let { f to it }
+                }
+                val existingSync = SyncMapMerger.merge(decodedSyncs.map { it.second })
+                if (existingSync != null && decodedSyncs.size > 1) {
+                    val consolidated = decodedSyncs
+                        .firstOrNull { it.first.name.equals(SYNC_MAP_FILE_NAME, ignoreCase = true) }
+                        ?.second
+                    if (!SyncMapMerger.isUpToDate(consolidated, existingSync)) {
+                        writeConsolidatedSyncMapToFile(File(dir, SYNC_MAP_FILE_NAME), existingSync)
+                    }
                 }
                 val syncMap = buildBookSyncMapFromDirectMp3s(dir, mp3Files, existingSync)
                 discoveredFolderKeys.add("folder://${dir.absolutePath}")
@@ -481,7 +495,7 @@ class AudiobookRepository(
             val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
 
             val mp3Docs = mutableListOf<Triple<String, String, Uri>>()
-            var syncMapUri: Uri? = null
+            val syncMapUris = mutableListOf<Uri>()
 
             runCatching {
                 context.contentResolver.query(childrenUri, proj, null, null, null)?.use { c ->
@@ -505,9 +519,7 @@ class AudiobookRepository(
                                 name.endsWith(".mp3", ignoreCase = true) -> {
                                     mp3Docs.add(Triple(cid, name, docUri))
                                 }
-                                name.equals("sync_map.json", ignoreCase = true) -> {
-                                    syncMapUri = docUri
-                                }
+                                isSyncMapFileName(name) -> syncMapUris.add(docUri)
                             }
                         }
                     }
@@ -515,12 +527,28 @@ class AudiobookRepository(
             }
 
             if (mp3Docs.isNotEmpty()) {
-                val existingSync = syncMapUri?.let { uri ->
+                // See the direct-path branch above: merge every sync_map*.json in the
+                // folder so a transfer that produced duplicates does not hide chapters.
+                val decodedSyncs = syncMapUris.mapNotNull { uri ->
                     runCatching {
                         context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { r ->
                             SyncAlignmentSerializer.decodeBookSyncMap(r.readText())
                         }
                     }.getOrNull()
+                }
+                val existingSync = SyncMapMerger.merge(decodedSyncs)
+                if (existingSync != null && decodedSyncs.size > 1) {
+                    val consolidatedUri = findChildDocument(dirUri, SYNC_MAP_FILE_NAME)
+                    val consolidated = consolidatedUri?.let { uri ->
+                        runCatching {
+                            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { r ->
+                                SyncAlignmentSerializer.decodeBookSyncMap(r.readText())
+                            }
+                        }.getOrNull()
+                    }
+                    if (!SyncMapMerger.isUpToDate(consolidated, existingSync)) {
+                        writeConsolidatedSyncMapToDocument(dirUri, existingSync)
+                    }
                 }
                 val syncMap = buildBookSyncMapFromSafMp3s(
                     folderName = dirName,
@@ -859,9 +887,81 @@ class AudiobookRepository(
         return bytes.joinToString("") { "%02x".format(it) }.take(32)
     }
 
+    /**
+     * True for `sync_map.json` and for the duplicate copies a file manager creates
+     * when the same name is copied twice: `sync_map (1).json`, `sync_map_1.json`,
+     * `sync_map-2.json`.
+     */
+    private fun isSyncMapFileName(name: String): Boolean {
+        val n = name.trim().lowercase(Locale.ROOT)
+        return n.startsWith("sync_map") && n.endsWith(".json")
+    }
+
+    /**
+     * Writes the merged map back so the next scan is a single read. Written to a
+     * temporary file and renamed, so an interrupted write cannot leave a truncated
+     * map behind.
+     */
+    private fun writeConsolidatedSyncMapToFile(target: File, map: BookSyncMap) {
+        runCatching {
+            val json = SyncAlignmentSerializer.encodeBookSyncMap(map)
+            val tmp = File(target.parentFile, target.name + ".tmp")
+            tmp.writeText(json)
+            if (target.exists()) target.delete()
+            tmp.renameTo(target)
+        }
+    }
+
+    /** SAF equivalent of [writeConsolidatedSyncMapToFile]. */
+    private fun writeConsolidatedSyncMapToDocument(dirUri: Uri, map: BookSyncMap) {
+        runCatching {
+            val json = SyncAlignmentSerializer.encodeBookSyncMap(map)
+            val resolver = context.contentResolver
+            findChildDocument(dirUri, SYNC_MAP_FILE_NAME)?.let { old ->
+                runCatching { DocumentsContract.deleteDocument(resolver, old) }
+            }
+            val created = DocumentsContract.createDocument(
+                resolver, dirUri, "application/json", SYNC_MAP_FILE_NAME
+            ) ?: return
+            resolver.openOutputStream(created)?.use { out ->
+                out.write(json.toByteArray(StandardCharsets.UTF_8))
+                out.flush()
+            }
+        }
+    }
+
+    /** Resolves a child document by display name inside a tree-backed directory URI. */
+    private fun findChildDocument(dirUri: Uri, targetName: String): Uri? {
+        return runCatching {
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+                dirUri, DocumentsContract.getDocumentId(dirUri)
+            )
+            val projection = arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME
+            )
+            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { c ->
+                val idIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                while (c.moveToNext()) {
+                    val name = c.getString(nameIdx) ?: continue
+                    if (name.equals(targetName, ignoreCase = true)) {
+                        return@use DocumentsContract.buildDocumentUriUsingTree(
+                            dirUri, c.getString(idIdx)
+                        )
+                    }
+                }
+                null
+            }
+        }.getOrNull()
+    }
+
     private companion object {
         /** Folder key prefix used for audiobooks discovered through MediaStore. */
         const val MEDIASTORE_AUDIO_FOLDER_PREFIX = "mediastore-audio://"
+
+        /** The name the app reads; a consolidated merge is written under this. */
+        const val SYNC_MAP_FILE_NAME = "sync_map.json"
     }
 
 }

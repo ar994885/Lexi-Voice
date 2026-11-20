@@ -283,8 +283,11 @@ class BackupSyncRepository(
                 //    can genuinely write there. All Files Access is no longer
                 //    requested, so this direct path is only reachable on API <= 32
                 //    where the legacy storage permission still applies.
-                val hasDirectWrite = Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
-                    Environment.getExternalStorageDirectory().canWrite()
+                val hasDirectWrite =
+                    (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                        Environment.isExternalStorageManager()) ||
+                        (Build.VERSION.SDK_INT < Build.VERSION_CODES.R &&
+                            Environment.getExternalStorageDirectory().canWrite())
                 if (hasDirectWrite) {
                     val exportDir = File(Environment.getExternalStorageDirectory(), "LexiVoice/Export")
                     if (exportDir.exists() || exportDir.mkdirs()) {

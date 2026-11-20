@@ -33,6 +33,34 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  // Two editions of the same app:
+  //
+  //   standard — "LexiVoice". Declares no All Files Access, so it stays
+  //              Play-compliant exactly as it ships today.
+  //   pro      — "LexiVoice Pro". Adds MANAGE_EXTERNAL_STORAGE so EPUBs anywhere
+  //              on the device are discovered automatically, for sideload and
+  //              GitHub distribution.
+  //
+  // They have different applicationIds so both can be installed side by side.
+  // The consequence worth knowing: separate IDs mean separate sandboxes, so each
+  // edition keeps its own library and reading progress.
+  //
+  // The Kotlin is shared. Only the manifest and the feature flag differ, so there
+  // is no BuildConfig.FLAVOR branching anywhere in the app.
+  flavorDimensions += "edition"
+  productFlavors {
+    create("standard") {
+      dimension = "edition"
+      applicationId = "app.lexivoice.reader"
+      resValue("bool", "feature_all_files_scan", "false")
+    }
+    create("pro") {
+      dimension = "edition"
+      applicationId = "app.lexivoice.reader.pro"
+      resValue("bool", "feature_all_files_scan", "true")
+    }
+  }
+
   // Do not remove or modify these signingConfigs. They are necessary for building, installing,
   // and updating Android apps in AI Studio.
   signingConfigs {
@@ -82,6 +110,9 @@ android {
   buildFeatures {
     compose = true
     buildConfig = true
+    // AGP 9 disables custom resource values by default; the edition flavours use
+    // resValue for the feature_all_files_scan flag.
+    resValues = true
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {

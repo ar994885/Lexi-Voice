@@ -224,6 +224,16 @@ class LibraryRepository(
      * which is exactly why the walk is no longer the primary path.
      */
     private fun canReadLegacyStorage(): Boolean {
+        // Pro edition only: All Files Access is declared in that flavour's manifest
+        // and granted by the user, so the whole storage root is readable on every
+        // API level. In the standard edition the permission is never declared, so
+        // this is always false and the direct-path sweep simply does not run.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            Environment.isExternalStorageManager()
+        ) {
+            return true
+        }
+        // Legacy path: API 32 and below with the old read permission.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return false
         val root = Environment.getExternalStorageDirectory()
         if (!root.exists() || !root.canRead()) return false

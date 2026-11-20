@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Overrides the standard edition's label so the two are distinguishable on
+         the launcher and in Settings. -->
+    <string name="app_name">LexiVoice Pro</string>
+</resources>
