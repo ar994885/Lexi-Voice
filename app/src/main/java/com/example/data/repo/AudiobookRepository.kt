@@ -292,15 +292,26 @@ class AudiobookRepository(
 
         for ((key, value) in candidates) {
             val (uri, displayName) = value
-            if (audiobookDao.getAudiobookByUri(key) != null) continue
-
             val lower = displayName.lowercase(Locale.ROOT)
-            val entity = when {
-                lower.endsWith(".m4b") -> mediaStoreM4bEntity(uri, displayName, key)
-                lower.endsWith(".mp3") -> mediaStoreMp3Entity(uri, displayName, key)
-                else -> null
-            } ?: continue
+            val existing = audiobookDao.getAudiobookByUri(key)
 
+            // Only .m4b is a genuinely single-file audiobook. An .mp3 is chapter
+            // material: the folder scan already registers the containing folder as
+            // ONE audiobook with chapters, so creating a row per file here listed
+            // every chapter twice — once as a fake "M4B" entry (the UI labels any
+            // non-folder audiobook that way) and once inside its folder.
+            if (!lower.endsWith(".m4b")) {
+                if (existing != null && !existing.isFolderAudiobook) {
+                    // Row left behind by the earlier behaviour. Remove it so the
+                    // duplicate disappears without the user clearing app data.
+                    audiobookDao.deleteAudiobook(existing.id)
+                }
+                continue
+            }
+
+            if (existing != null) continue
+
+            val entity = mediaStoreM4bEntity(uri, displayName, key) ?: continue
             audiobookDao.upsertAudiobookPreservingProgress(entity)
             entity.folderUri?.let { discoveredFolderKeys.add(it) }
         }
@@ -364,34 +375,6 @@ class AudiobookRepository(
             durationMs = parsed.durationMs,
             chapterCount = parsed.chapters.size.coerceAtLeast(1),
             chaptersJson = SyncAlignmentSerializer.encodeChapters(parsed.chapters),
-            isFolderAudiobook = false,
-            folderUri = MEDIASTORE_AUDIO_FOLDER_PREFIX + (uri.lastPathSegment ?: "Device audio"),
-            chapterFilesJson = "[]",
-            addedAt = System.currentTimeMillis()
-        )
-    }
-
-    private fun mediaStoreMp3Entity(uri: Uri, displayName: String, key: String): AudiobookEntity? {
-        val fallbackTitle = displayName.substringBeforeLast('.')
-        val parsed = inspectMp3FromUri(uri, fallbackTitle)
-        val coverPath = parsed.coverBytes?.let { saveCoverBytes(it, key) }
-        val chapter = AudiobookChapterMeta(
-            index = 0,
-            title = parsed.title,
-            startMs = 0L,
-            endMs = parsed.durationMs
-        )
-        return AudiobookEntity(
-            fileUri = key,
-            isDirectPath = false,
-            title = parsed.title,
-            author = parsed.artist,
-            narrator = "LexiVoice TTS",
-            genre = parsed.album.ifBlank { "Audiobook" },
-            coverPath = coverPath,
-            durationMs = parsed.durationMs,
-            chapterCount = 1,
-            chaptersJson = SyncAlignmentSerializer.encodeChapters(listOf(chapter)),
             isFolderAudiobook = false,
             folderUri = MEDIASTORE_AUDIO_FOLDER_PREFIX + (uri.lastPathSegment ?: "Device audio"),
             chapterFilesJson = "[]",
