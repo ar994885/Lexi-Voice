@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
 import android.provider.Settings
+import com.example.R
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -168,6 +169,15 @@ fun SettingsScreen(
             Manifest.permission.READ_EXTERNAL_STORAGE
         }
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    // True only in the Pro edition, where the flavour manifest declares
+    // MANAGE_EXTERNAL_STORAGE. Read from a boolean resource so the shared UI needs
+    // no BuildConfig.FLAVOR check.
+    val hasAllFilesScanCapability = context.resources.getBoolean(R.bool.feature_all_files_scan)
+
+    val hasAllFilesAccess = remember(resumeTick) {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()
     }
 
     val hasNotificationPerm = remember(resumeTick) {
@@ -451,6 +461,31 @@ fun SettingsScreen(
                         }
                     }
                 )
+            }
+
+            if (hasAllFilesScanCapability) {
+                item {
+                    SettingsPermissionCard(
+                        title = "Full-Device Book Scanning",
+                        subtitle = if (hasAllFilesAccess)
+                            "Granted — EPUBs anywhere on this device are found automatically"
+                        else "Allow LexiVoice Pro to scan all folders for EPUBs automatically",
+                        isGranted = hasAllFilesAccess,
+                        icon = { Icon(Icons.Default.Security, contentDescription = null) },
+                        onGrant = {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(
+                                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
             }
 
             item {

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   LexiVoice Pro only.
+
+   All Files Access lets the app walk the whole storage root, so EPUBs anywhere on
+   the device are discovered automatically without the user granting folders one
+   by one. It is a restricted permission on Google Play, which is exactly why it
+   lives in this flavour's manifest and never reaches the standard edition.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+</manifest>
