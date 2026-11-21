@@ -103,6 +103,7 @@ class M4bPlaybackService : Service() {
     private val refreshMutex = Mutex()
     private var sleepEndTimeMs: Long = 0L
     private var lastChapterForSleep: Int = -1
+    private var sleepTimerMinutes: Int = 0
     private var lastSavedTick: Long = 0L
     private var wasPausedByUser: Boolean = false
 
@@ -720,8 +721,9 @@ class M4bPlaybackService : Service() {
     }
 
     private fun configureSleepTimer(mode: SleepTimerMode, minutes: Int) {
+        if (mode == SleepTimerMode.MINUTES) sleepTimerMinutes = minutes.coerceIn(1, 600)
         sleepEndTimeMs = if (mode == SleepTimerMode.MINUTES) {
-            System.currentTimeMillis() + (minutes.coerceAtLeast(1) * 60_000L)
+            System.currentTimeMillis() + (sleepTimerMinutes * 60_000L)
         } else {
             0L
         }
@@ -750,18 +752,33 @@ class M4bPlaybackService : Service() {
                     }
 
                     val st = M4bPlayerStateHolder.state.value
-                    if (st.sleepTimerMode == SleepTimerMode.MINUTES && sleepEndTimeMs > 0L) {
-                        val rem = sleepEndTimeMs - now
-                        if (rem <= 0L) {
-                            pausePlayback()
-                            configureSleepTimer(SleepTimerMode.OFF, 0)
-                        } else {
-                            M4bPlayerStateHolder.updateState { it.copy(sleepRemainingMs = rem) }
+                    if (st.sleepTimerMode == SleepTimerMode.MINUTES) {
+                        // The timer stays armed until the user switches it off, so a
+                        // fresh countdown begins as soon as playback resumes.
+                        if (sleepEndTimeMs <= 0L && sleepTimerMinutes > 0 && player.isPlaying) {
+                            sleepEndTimeMs = now + sleepTimerMinutes * 60_000L
+                            M4bPlayerStateHolder.updateState {
+                                it.copy(sleepRemainingMs = sleepTimerMinutes * 60_000L)
+                            }
+                        }
+                        if (sleepEndTimeMs > 0L) {
+                            val rem = sleepEndTimeMs - now
+                            if (rem <= 0L) {
+                                pausePlayback()
+                                sleepEndTimeMs = 0L
+                                M4bPlayerStateHolder.updateState {
+                                    it.copy(sleepRemainingMs = sleepTimerMinutes * 60_000L)
+                                }
+                            } else {
+                                M4bPlayerStateHolder.updateState { it.copy(sleepRemainingMs = rem) }
+                            }
                         }
                     } else if (st.sleepTimerMode == SleepTimerMode.END_OF_CHAPTER) {
                         if (st.currentChapterIndex > lastChapterForSleep && player.isPlaying) {
                             pausePlayback()
-                            configureSleepTimer(SleepTimerMode.OFF, 0)
+                            // Stay armed: re-anchor to this chapter so the end of the
+                            // next chapter stops playback again.
+                            lastChapterForSleep = st.currentChapterIndex
                         }
                     }
                 }

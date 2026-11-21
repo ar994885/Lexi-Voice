@@ -1,0 +1,189 @@
+diff --git a/app/src/main/java/com/example/data/repo/AudiobookRepository.kt b/app/src/main/java/com/example/data/repo/AudiobookRepository.kt
+index 38e6fd4..e7e3ec8 100644
+--- a/app/src/main/java/com/example/data/repo/AudiobookRepository.kt
++++ b/app/src/main/java/com/example/data/repo/AudiobookRepository.kt
+@@ -6,7 +6,6 @@ import android.graphics.Bitmap
+ import android.graphics.BitmapFactory
+ import android.media.MediaMetadataRetriever
+ import android.net.Uri
+-import android.os.Build
+ import android.provider.DocumentsContract
+ import android.provider.MediaStore
+ import androidx.documentfile.provider.DocumentFile
+@@ -256,7 +255,14 @@ class AudiobookRepository(
+         if (watched.isNotEmpty() || exportFolderUris.isNotEmpty()) {
+             val allExisting = runCatching { audiobookDao.observeAllAudiobooks().first() }.getOrDefault(emptyList())
+             for (item in allExisting) {
+-                if (item.isFolderAudiobook && item.fileUri !in discoveredFolderKeys) {
++                if (!item.isFolderAudiobook) continue
++                if (item.fileUri in discoveredFolderKeys) continue
++                // "Not rediscovered" is not proof the folder is gone: a revoked
++                // permission, an unmounted volume or a lost SAF grant all look the
++                // same, and deleting on that basis silently wipes library rows the
++                // user never removed. Only drop a row when the folder is provably
++                // absent.
++                if (isFolderProvablyGone(item.fileUri)) {
+                     audiobookDao.deleteAudiobook(item.id)
+                 }
+             }
+@@ -280,30 +286,53 @@ class AudiobookRepository(
+      * and anything already indexed by URI is skipped, so the two paths never
+      * produce duplicate rows.
+      */
++    /** One file as MediaStore exposed it, before de-duplication. */
++    private data class MediaStoreAudioCandidate(
++        val uri: Uri,
++        val displayName: String,
++        val sizeBytes: Long,
++        val fromAudioCollection: Boolean
++    )
++
+     private suspend fun scanMediaStoreForAudiobooks(discoveredFolderKeys: MutableSet<String>) {
+-        val candidates = linkedMapOf<String, Pair<Uri, String>>() // uriString -> (uri, displayName)
++        val candidates = mutableListOf<MediaStoreAudioCandidate>()
+ 
+-        collectMediaStoreAudio(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, candidates)
+-        // .m4b is audio/mp4 and normally lands in MediaStore.Audio, but some
+-        // vendor indexers file it as a generic document, so sweep Files too.
+-        collectMediaStoreAudio(MediaStore.Files.getContentUri("external"), candidates)
++        collectMediaStoreAudio(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, candidates)
++        // .m4b is audio/mp4 and normally lands in MediaStore.Audio, but some vendor
++        // indexers file it as a generic document, so sweep Files too.
++        collectMediaStoreAudio(MediaStore.Files.getContentUri("external"), false, candidates)
+ 
+         if (candidates.isEmpty()) return
+ 
+-        for ((key, value) in candidates) {
+-            val (uri, displayName) = value
++        // The SAME file appears in both collections under different URIs
++        // (…/audio/media/<id> and …/file/<id>). Keying on the URI string therefore
++        // produced two audiobook rows for every file, so group by name+size and
++        // treat each group as a single file.
++        val byFile = candidates.groupBy {
++            "${it.displayName.lowercase(Locale.ROOT)}|${it.sizeBytes}"
++        }
++
++        for (group in byFile.values) {
++            // Prefer the audio collection: it yields the proper audio content URI.
++            val preferred = group.firstOrNull { it.fromAudioCollection } ?: group.first()
++            val displayName = preferred.displayName
+             val lower = displayName.lowercase(Locale.ROOT)
++            val key = preferred.uri.toString()
++
++            // Remove rows the other collection's URI created for this same file.
++            for (other in group) {
++                if (other.uri == preferred.uri) continue
++                val stray = audiobookDao.getAudiobookByUri(other.uri.toString()) ?: continue
++                if (!stray.isFolderAudiobook) audiobookDao.deleteAudiobook(stray.id)
++            }
++
+             val existing = audiobookDao.getAudiobookByUri(key)
+ 
+             // Only .m4b is a genuinely single-file audiobook. An .mp3 is chapter
+-            // material: the folder scan already registers the containing folder as
+-            // ONE audiobook with chapters, so creating a row per file here listed
+-            // every chapter twice — once as a fake "M4B" entry (the UI labels any
+-            // non-folder audiobook that way) and once inside its folder.
++            // material owned by the folder scan, which registers the containing
++            // folder as one audiobook with chapters.
+             if (!lower.endsWith(".m4b")) {
+                 if (existing != null && !existing.isFolderAudiobook) {
+-                    // Row left behind by the earlier behaviour. Remove it so the
+-                    // duplicate disappears without the user clearing app data.
+                     audiobookDao.deleteAudiobook(existing.id)
+                 }
+                 continue
+@@ -311,31 +340,22 @@ class AudiobookRepository(
+ 
+             if (existing != null) continue
+ 
+-            val entity = mediaStoreM4bEntity(uri, displayName, key) ?: continue
++            val entity = mediaStoreM4bEntity(preferred.uri, displayName, key) ?: continue
+             audiobookDao.upsertAudiobookPreservingProgress(entity)
+             entity.folderUri?.let { discoveredFolderKeys.add(it) }
+         }
+     }
+ 
+-    /**
+-     * Reads one MediaStore collection and records every .m4b / .mp3 it exposes.
+-     * RELATIVE_PATH is used for grouping where the platform provides it.
+-     */
++    /** Reads one MediaStore collection and appends every .m4b / .mp3 it exposes. */
+     private fun collectMediaStoreAudio(
+         collection: Uri,
+-        out: MutableMap<String, Pair<Uri, String>>
++        fromAudioCollection: Boolean,
++        out: MutableList<MediaStoreAudioCandidate>
+     ) {
+-        val hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+-        val pathColumn = if (hasRelativePath) {
+-            MediaStore.MediaColumns.RELATIVE_PATH
+-        } else {
+-            @Suppress("DEPRECATION")
+-            MediaStore.MediaColumns.DATA
+-        }
+         val projection = arrayOf(
+             MediaStore.MediaColumns._ID,
+             MediaStore.MediaColumns.DISPLAY_NAME,
+-            pathColumn
++            MediaStore.MediaColumns.SIZE
+         )
+         val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? OR " +
+             "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
+@@ -347,19 +367,53 @@ class AudiobookRepository(
+                 ?.use { cursor ->
+                     val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                     val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+-                    val pathIdx = cursor.getColumnIndex(pathColumn)
++                    val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                     while (cursor.moveToNext()) {
+                         val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
+                         val name = if (nameIdx >= 0) cursor.getString(nameIdx).orEmpty() else ""
+                         val lower = name.lowercase(Locale.ROOT)
+                         if (!lower.endsWith(".m4b") && !lower.endsWith(".mp3")) continue
+-                        val uri = ContentUris.withAppendedId(collection, id)
+-                        out[uri.toString()] = uri to name
++                        val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else -1L
++                        out.add(
++                            MediaStoreAudioCandidate(
++                                uri = ContentUris.withAppendedId(collection, id),
++                                displayName = name,
++                                sizeBytes = size,
++                                fromAudioCollection = fromAudioCollection
++                            )
++                        )
+                     }
+                 }
+         }
+     }
+ 
++    /**
++     * True only when the backing folder can be shown to no longer exist. Any doubt —
++     * unreadable volume, missing permission, provider error — returns false so the
++     * row survives.
++     */
++    private fun isFolderProvablyGone(folderKey: String): Boolean {
++        if (!folderKey.startsWith("folder://")) return false
++        val target = folderKey.removePrefix("folder://")
++
++        if (target.startsWith("content://")) {
++            // SAF: only when the provider still resolves the document and says it is
++            // gone. A failed query means "unknown", so the row survives.
++            return runCatching {
++                DocumentFile.fromSingleUri(context, Uri.parse(target))?.exists() == false
++            }.getOrDefault(false)
++        }
++
++        // Direct path. File.exists() returns false both for "deleted" and for "this
++        // app may not read here" — an SD card without All Files Access looks exactly
++        // like a deleted folder. Only trust a negative answer when the parent
++        // directory is actually listable, otherwise the row is kept.
++        val file = File(target)
++        val parent = file.parentFile ?: return false
++        if (!parent.canRead()) return false
++        return runCatching { !file.exists() }.getOrDefault(false)
++    }
++
+     private fun mediaStoreM4bEntity(uri: Uri, displayName: String, key: String): AudiobookEntity? {
+         val fallbackTitle = displayName.substringBeforeLast('.')
+         val parsed = inspectM4bFromUri(uri, fallbackTitle, key)

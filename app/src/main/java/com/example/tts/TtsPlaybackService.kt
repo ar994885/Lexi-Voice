@@ -50,6 +50,7 @@ class TtsPlaybackService : Service() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var sleepTimerJob: Job? = null
+    private var sleepTimerMinutes: Int = 0
 
     private var currentUtteranceId: String = ""
     private var pendingSpeakAfterInit: Boolean = false
@@ -490,6 +491,13 @@ class TtsPlaybackService : Service() {
     private fun speakCurrentSentence() {
         val session = TtsStateHolder.sessionContent ?: return
         val st = TtsStateHolder.state.value
+        // Re-arm a persistent sleep timer after a timer-triggered pause.
+        if (st.sleepTimerMode == SleepTimerMode.MINUTES &&
+            sleepTimerMinutes > 0 &&
+            sleepTimerJob?.isActive != true
+        ) {
+            startSleepCountdown(sleepTimerMinutes * 60_000L)
+        }
         val sentence = session.sentences.getOrNull(st.sentenceIndex) ?: return
         val paragraphText = session.paragraphs.getOrNull(sentence.paragraphIndex)?.text ?: sentence.text
 
@@ -587,9 +595,8 @@ class TtsPlaybackService : Service() {
             speakCurrentSentence()
         } else {
             if (st.sleepTimerMode == SleepTimerMode.END_OF_CHAPTER) {
-                TtsStateHolder.updateState {
-                    it.copy(sleepTimerMode = SleepTimerMode.OFF, sleepRemainingMs = 0L)
-                }
+                // Stay armed: resuming carries on into the next chapter, and the end
+                // of that chapter stops playback again until the user turns it off.
                 pausePlayback()
                 return
             }
@@ -752,24 +759,32 @@ class TtsPlaybackService : Service() {
                 }
             }
             SleepTimerMode.MINUTES -> {
-                val safeMin = minutes.coerceIn(1, 600)
-                val totalMs = safeMin * 60_000L
+                sleepTimerMinutes = minutes.coerceIn(1, 600)
+                val totalMs = sleepTimerMinutes * 60_000L
                 TtsStateHolder.updateState {
                     it.copy(sleepTimerMode = SleepTimerMode.MINUTES, sleepRemainingMs = totalMs)
                 }
-                sleepTimerJob = serviceScope.launch {
-                    var remaining = totalMs
-                    while (remaining > 0L) {
-                        delay(1000L)
-                        remaining -= 1000L
-                        TtsStateHolder.updateState { it.copy(sleepRemainingMs = remaining.coerceAtLeast(0L)) }
-                    }
-                    TtsStateHolder.updateState {
-                        it.copy(sleepTimerMode = SleepTimerMode.OFF, sleepRemainingMs = 0L)
-                    }
-                    pausePlayback()
-                }
+                startSleepCountdown(totalMs)
             }
+        }
+    }
+
+    /**
+     * Counts down a sleep timer. When it expires playback pauses but the timer stays
+     * armed, so resuming starts a fresh countdown — the timer is a persistent limit
+     * the user switches off explicitly, not a one-shot.
+     */
+    private fun startSleepCountdown(totalMs: Long) {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = serviceScope.launch {
+            var remaining = totalMs
+            while (remaining > 0L) {
+                delay(1000L)
+                remaining -= 1000L
+                TtsStateHolder.updateState { it.copy(sleepRemainingMs = remaining.coerceAtLeast(0L)) }
+            }
+            pausePlayback()
+            TtsStateHolder.updateState { it.copy(sleepRemainingMs = totalMs) }
         }
     }
 

@@ -16,7 +16,7 @@ permissions:
 env:
   # Bump this on each release. The build falls back to it when the Gradle
   # property is not supplied, so local and CI builds stay in step.
-  VERSION_NAME: '0.0.4'
+  VERSION_NAME: '0.0.5'
 
 jobs:
   build:

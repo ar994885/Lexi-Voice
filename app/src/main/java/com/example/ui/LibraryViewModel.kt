@@ -7,6 +7,7 @@ import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.LexiVoiceApplication
+import com.example.data.db.AudiobookEntity
 import com.example.data.db.BookEntity
 import com.example.data.db.LibrarySortOption
 import com.example.data.db.ShelfEntity
@@ -84,6 +85,11 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val folders: StateFlow<List<WatchedFolderEntity>> = libraryRepo.folders
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Audiobooks, so the folders screen can show how many each folder produced. */
+    val audiobooks: StateFlow<List<AudiobookEntity>> = app.database.audiobookDao()
+        .observeAllAudiobooks()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val recentBooks: StateFlow<List<BookEntity>> = libraryRepo.recentBooks

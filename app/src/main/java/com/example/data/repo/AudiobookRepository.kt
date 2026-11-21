@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
@@ -256,7 +255,14 @@ class AudiobookRepository(
         if (watched.isNotEmpty() || exportFolderUris.isNotEmpty()) {
             val allExisting = runCatching { audiobookDao.observeAllAudiobooks().first() }.getOrDefault(emptyList())
             for (item in allExisting) {
-                if (item.isFolderAudiobook && item.fileUri !in discoveredFolderKeys) {
+                if (!item.isFolderAudiobook) continue
+                if (item.fileUri in discoveredFolderKeys) continue
+                // "Not rediscovered" is not proof the folder is gone: a revoked
+                // permission, an unmounted volume or a lost SAF grant all look the
+                // same, and deleting on that basis silently wipes library rows the
+                // user never removed. Only drop a row when the folder is provably
+                // absent.
+                if (isFolderProvablyGone(item.fileUri)) {
                     audiobookDao.deleteAudiobook(item.id)
                 }
             }
@@ -280,30 +286,53 @@ class AudiobookRepository(
      * and anything already indexed by URI is skipped, so the two paths never
      * produce duplicate rows.
      */
-    private suspend fun scanMediaStoreForAudiobooks(discoveredFolderKeys: MutableSet<String>) {
-        val candidates = linkedMapOf<String, Pair<Uri, String>>() // uriString -> (uri, displayName)
+    /** One file as MediaStore exposed it, before de-duplication. */
+    private data class MediaStoreAudioCandidate(
+        val uri: Uri,
+        val displayName: String,
+        val sizeBytes: Long,
+        val fromAudioCollection: Boolean
+    )
 
-        collectMediaStoreAudio(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, candidates)
-        // .m4b is audio/mp4 and normally lands in MediaStore.Audio, but some
-        // vendor indexers file it as a generic document, so sweep Files too.
-        collectMediaStoreAudio(MediaStore.Files.getContentUri("external"), candidates)
+    private suspend fun scanMediaStoreForAudiobooks(discoveredFolderKeys: MutableSet<String>) {
+        val candidates = mutableListOf<MediaStoreAudioCandidate>()
+
+        collectMediaStoreAudio(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, candidates)
+        // .m4b is audio/mp4 and normally lands in MediaStore.Audio, but some vendor
+        // indexers file it as a generic document, so sweep Files too.
+        collectMediaStoreAudio(MediaStore.Files.getContentUri("external"), false, candidates)
 
         if (candidates.isEmpty()) return
 
-        for ((key, value) in candidates) {
-            val (uri, displayName) = value
+        // The SAME file appears in both collections under different URIs
+        // (…/audio/media/<id> and …/file/<id>). Keying on the URI string therefore
+        // produced two audiobook rows for every file, so group by name+size and
+        // treat each group as a single file.
+        val byFile = candidates.groupBy {
+            "${it.displayName.lowercase(Locale.ROOT)}|${it.sizeBytes}"
+        }
+
+        for (group in byFile.values) {
+            // Prefer the audio collection: it yields the proper audio content URI.
+            val preferred = group.firstOrNull { it.fromAudioCollection } ?: group.first()
+            val displayName = preferred.displayName
             val lower = displayName.lowercase(Locale.ROOT)
+            val key = preferred.uri.toString()
+
+            // Remove rows the other collection's URI created for this same file.
+            for (other in group) {
+                if (other.uri == preferred.uri) continue
+                val stray = audiobookDao.getAudiobookByUri(other.uri.toString()) ?: continue
+                if (!stray.isFolderAudiobook) audiobookDao.deleteAudiobook(stray.id)
+            }
+
             val existing = audiobookDao.getAudiobookByUri(key)
 
             // Only .m4b is a genuinely single-file audiobook. An .mp3 is chapter
-            // material: the folder scan already registers the containing folder as
-            // ONE audiobook with chapters, so creating a row per file here listed
-            // every chapter twice — once as a fake "M4B" entry (the UI labels any
-            // non-folder audiobook that way) and once inside its folder.
+            // material owned by the folder scan, which registers the containing
+            // folder as one audiobook with chapters.
             if (!lower.endsWith(".m4b")) {
                 if (existing != null && !existing.isFolderAudiobook) {
-                    // Row left behind by the earlier behaviour. Remove it so the
-                    // duplicate disappears without the user clearing app data.
                     audiobookDao.deleteAudiobook(existing.id)
                 }
                 continue
@@ -311,31 +340,22 @@ class AudiobookRepository(
 
             if (existing != null) continue
 
-            val entity = mediaStoreM4bEntity(uri, displayName, key) ?: continue
+            val entity = mediaStoreM4bEntity(preferred.uri, displayName, key) ?: continue
             audiobookDao.upsertAudiobookPreservingProgress(entity)
             entity.folderUri?.let { discoveredFolderKeys.add(it) }
         }
     }
 
-    /**
-     * Reads one MediaStore collection and records every .m4b / .mp3 it exposes.
-     * RELATIVE_PATH is used for grouping where the platform provides it.
-     */
+    /** Reads one MediaStore collection and appends every .m4b / .mp3 it exposes. */
     private fun collectMediaStoreAudio(
         collection: Uri,
-        out: MutableMap<String, Pair<Uri, String>>
+        fromAudioCollection: Boolean,
+        out: MutableList<MediaStoreAudioCandidate>
     ) {
-        val hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-        val pathColumn = if (hasRelativePath) {
-            MediaStore.MediaColumns.RELATIVE_PATH
-        } else {
-            @Suppress("DEPRECATION")
-            MediaStore.MediaColumns.DATA
-        }
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,
             MediaStore.MediaColumns.DISPLAY_NAME,
-            pathColumn
+            MediaStore.MediaColumns.SIZE
         )
         val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ? OR " +
             "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE ?"
@@ -347,17 +367,51 @@ class AudiobookRepository(
                 ?.use { cursor ->
                     val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
                     val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
-                    val pathIdx = cursor.getColumnIndex(pathColumn)
+                    val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
                     while (cursor.moveToNext()) {
                         val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
                         val name = if (nameIdx >= 0) cursor.getString(nameIdx).orEmpty() else ""
                         val lower = name.lowercase(Locale.ROOT)
                         if (!lower.endsWith(".m4b") && !lower.endsWith(".mp3")) continue
-                        val uri = ContentUris.withAppendedId(collection, id)
-                        out[uri.toString()] = uri to name
+                        val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else -1L
+                        out.add(
+                            MediaStoreAudioCandidate(
+                                uri = ContentUris.withAppendedId(collection, id),
+                                displayName = name,
+                                sizeBytes = size,
+                                fromAudioCollection = fromAudioCollection
+                            )
+                        )
                     }
                 }
         }
+    }
+
+    /**
+     * True only when the backing folder can be shown to no longer exist. Any doubt —
+     * unreadable volume, missing permission, provider error — returns false so the
+     * row survives.
+     */
+    private fun isFolderProvablyGone(folderKey: String): Boolean {
+        if (!folderKey.startsWith("folder://")) return false
+        val target = folderKey.removePrefix("folder://")
+
+        if (target.startsWith("content://")) {
+            // SAF: only when the provider still resolves the document and says it is
+            // gone. A failed query means "unknown", so the row survives.
+            return runCatching {
+                DocumentFile.fromSingleUri(context, Uri.parse(target))?.exists() == false
+            }.getOrDefault(false)
+        }
+
+        // Direct path. File.exists() returns false both for "deleted" and for "this
+        // app may not read here" — an SD card without All Files Access looks exactly
+        // like a deleted folder. Only trust a negative answer when the parent
+        // directory is actually listable, otherwise the row is kept.
+        val file = File(target)
+        val parent = file.parentFile ?: return false
+        if (!parent.canRead()) return false
+        return runCatching { !file.exists() }.getOrDefault(false)
     }
 
     private fun mediaStoreM4bEntity(uri: Uri, displayName: String, key: String): AudiobookEntity? {
@@ -753,8 +807,12 @@ class AudiobookRepository(
         runCatching { retriever.release() }
 
         val chapters = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
-                readChplChaptersFromStream(stream, durationMs)
+            // A file descriptor rather than openInputStream: the chpl box has to be
+            // reached by seeking, not by reading the whole file.
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                FileInputStream(pfd.fileDescriptor).use { stream ->
+                    readChplChapters(stream, durationMs)
+                }
             } ?: emptyList()
         }.getOrDefault(emptyList())
 
@@ -799,7 +857,7 @@ class AudiobookRepository(
 
         val chapters = runCatching {
             FileInputStream(file).use { stream ->
-                readChplChaptersFromStream(stream, durationMs)
+                readChplChapters(stream, durationMs)
             }
         }.getOrDefault(emptyList())
 
@@ -818,25 +876,40 @@ class AudiobookRepository(
         )
     }
 
-    private fun readChplChaptersFromStream(stream: InputStream, totalDurationMs: Long): List<AudiobookChapterMeta> {
-        val bytes = stream.readBytes()
-        val marker = "chpl".toByteArray(StandardCharsets.US_ASCII)
-        var idx = -1
-        for (i in 4 until bytes.size - 16) {
-            if (bytes[i] == marker[0] && bytes[i + 1] == marker[1] &&
-                bytes[i + 2] == marker[2] && bytes[i + 3] == marker[3]
-            ) {
-                idx = i - 4
-                break
-            }
-        }
-        if (idx < 0) return emptyList()
-        val boxSize = ByteBuffer.wrap(bytes, idx, 4).order(ByteOrder.BIG_ENDIAN).int
-        if (boxSize < 17 || idx + boxSize > bytes.size) return emptyList()
+    /**
+     * Reads the Nero `chpl` chapter atom by walking the MP4 box tree.
+     *
+     * The previous implementation called `stream.readBytes()`, which pulls the WHOLE
+     * file into a single ByteArray just to reach a box of a few hundred bytes. For a
+     * 600 MB audiobook that is an immediate OutOfMemoryError; the caller's runCatching
+     * swallowed it and the `ifEmpty` fallback turned it into a single chapter, so
+     * every large book silently reported "1 ch".
+     *
+     * Seeking instead means memory use is a few kilobytes regardless of file size,
+     * and it works whether `moov` sits at the front (faststart) or the end.
+     */
+    private fun readChplChapters(
+        stream: FileInputStream,
+        totalDurationMs: Long
+    ): List<AudiobookChapterMeta> {
+        val fileSize = runCatching { stream.channel.size() }.getOrDefault(0L)
+        if (fileSize <= 16L) return emptyList()
 
-        val bb = ByteBuffer.wrap(bytes, idx + 8, boxSize - 8).order(ByteOrder.BIG_ENDIAN)
-        bb.int
-        bb.get()
+        // moov/udta/chpl is the standard location; a few muxers put it directly
+        // under moov.
+        val chpl = findBox(stream, 0L, fileSize, listOf("moov", "udta", "chpl"))
+            ?: findBox(stream, 0L, fileSize, listOf("moov", "chpl"))
+            ?: return emptyList()
+
+        val payloadSize = (chpl.end - chpl.bodyStart).toInt()
+        if (payloadSize < 9) return emptyList()
+        val payload = ByteArray(payloadSize)
+        runCatching { stream.channel.position(chpl.bodyStart) }.getOrElse { return emptyList() }
+        if (!readFully(stream, payload)) return emptyList()
+
+        val bb = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+        bb.int                    // version + flags
+        bb.get()                  // first reserved byte
         val count = bb.int.coerceIn(0, 2000)
         val rawList = mutableListOf<Pair<Long, String>>()
         for (c in 0 until count) {
@@ -848,10 +921,63 @@ class AudiobookRepository(
             bb.get(titleBuf)
             rawList.add((start100ns / 10_000L) to String(titleBuf, StandardCharsets.UTF_8))
         }
+        if (rawList.isEmpty()) return emptyList()
         return rawList.mapIndexed { i, (startMs, chTitle) ->
             val endMs = rawList.getOrNull(i + 1)?.first ?: totalDurationMs.coerceAtLeast(startMs)
             AudiobookChapterMeta(i, chTitle, startMs, endMs)
         }
+    }
+
+    private data class Mp4Box(val type: String, val bodyStart: Long, val end: Long)
+
+    /** Depth-first search for a box path, seeking over media data instead of reading it. */
+    private fun findBox(
+        stream: FileInputStream,
+        start: Long,
+        end: Long,
+        path: List<String>
+    ): Mp4Box? {
+        if (path.isEmpty()) return null
+        var pos = start
+        while (pos + 8 <= end) {
+            runCatching { stream.channel.position(pos) }.getOrElse { return null }
+            val header = ByteArray(8)
+            if (!readFully(stream, header)) return null
+            var size = ((header[0].toLong() and 0xFF) shl 24) or
+                ((header[1].toLong() and 0xFF) shl 16) or
+                ((header[2].toLong() and 0xFF) shl 8) or
+                (header[3].toLong() and 0xFF)
+            val type = String(header, 4, 4, StandardCharsets.US_ASCII)
+            var headerSize = 8L
+            if (size == 1L) {
+                val ext = ByteArray(8)
+                if (!readFully(stream, ext)) return null
+                size = 0L
+                for (b in ext) size = (size shl 8) or (b.toLong() and 0xFF)
+                headerSize = 16L
+            } else if (size == 0L) {
+                size = end - pos
+            }
+            if (size < headerSize || pos + size > end) return null
+
+            if (type == path.first()) {
+                val box = Mp4Box(type, pos + headerSize, pos + size)
+                if (path.size == 1) return box
+                findBox(stream, box.bodyStart, box.end, path.drop(1))?.let { return it }
+            }
+            pos += size
+        }
+        return null
+    }
+
+    private fun readFully(stream: FileInputStream, buf: ByteArray): Boolean {
+        var read = 0
+        while (read < buf.size) {
+            val n = stream.read(buf, read, buf.size - read)
+            if (n <= 0) return false
+            read += n
+        }
+        return true
     }
 
     fun saveCoverBytes(rawBytes: ByteArray, key: String): String? {

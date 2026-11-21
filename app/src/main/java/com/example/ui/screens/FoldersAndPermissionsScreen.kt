@@ -77,6 +77,7 @@ fun FoldersAndPermissionsScreen(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val folders by viewModel.folders.collectAsStateWithLifecycle()
+    val audiobooks by viewModel.audiobooks.collectAsStateWithLifecycle()
     val scanProgress by viewModel.scanProgress.collectAsStateWithLifecycle()
 
     var resumeTick by remember { mutableIntStateOf(0) }
@@ -242,8 +243,14 @@ fun FoldersAndPermissionsScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                val audiobookCount = remember(audiobooks, folder.uriOrPath) {
+                                    val prefix = "folder://" + folder.uriOrPath
+                                    audiobooks.count {
+                                        it.isFolderAudiobook && it.fileUri.startsWith(prefix)
+                                    }
+                                }
                                 Text(
-                                    text = "${folder.bookCount} EPUB(s) • ${if (folder.isDirectPath) "Direct Path" else "SAF"} • $syncTime",
+                                    text = "${folder.bookCount} EPUB(s) • $audiobookCount audiobook(s) • ${if (folder.isDirectPath) "Direct Path" else "SAF"} • $syncTime",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
