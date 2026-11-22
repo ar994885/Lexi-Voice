@@ -267,6 +267,45 @@ class AudiobookRepository(
                 }
             }
         }
+
+        // Collapse rows that describe the same file. MediaStore discovery and the
+        // folder scan reach the same .m4b by different URIs, so keying rows by URI
+        // alone leaves one copy per route — and watching one directory as both
+        // Direct Path and SAF produces two more. Both routes read the embedded
+        // metadata, so title + duration identifies the file regardless of route.
+        dedupeAudiobooksDescribingTheSameFile()
+    }
+
+    /**
+     * Removes audiobook rows that point at the same file, keeping the richest one.
+     * Never touches the files on disk, and never merges an MP3 folder with a
+     * compiled M4B of the same book — those are genuinely different audiobooks.
+     */
+    private suspend fun dedupeAudiobooksDescribingTheSameFile() {
+        val all = runCatching { audiobookDao.observeAllAudiobooks().first() }.getOrDefault(emptyList())
+        if (all.size <= 1) return
+
+        val groups = all.groupBy {
+            // Durations from the same file can differ by a few ms depending on the
+            // reader, so bucket to 2 s rather than comparing exactly.
+            "${it.title.trim().lowercase(Locale.ROOT)}|${it.durationMs / 2000L}"
+        }
+
+        for (group in groups.values) {
+            if (group.size <= 1) continue
+            group.filter { it.isFolderAudiobook }.keepRichest()
+            group.filterNot { it.isFolderAudiobook }.keepRichest()
+        }
+    }
+
+    private suspend fun List<AudiobookEntity>.keepRichest() {
+        if (size <= 1) return
+        val keep = sortedWith(
+            compareByDescending<AudiobookEntity> { it.chapterCount }
+                .thenByDescending { it.lastPlayedAt }
+                .thenBy { it.id }
+        ).first()
+        forEach { if (it.id != keep.id) audiobookDao.deleteAudiobook(it.id) }
     }
 
 
