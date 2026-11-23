@@ -85,6 +85,24 @@ class LibraryRepository(
 
     suspend fun getBookByFileKey(fileKey: String): BookEntity? = bookDao.getBookByFileKey(fileKey)
 
+    /**
+     * Resolves a sync map's `sourceEpubKey` to a book on THIS device.
+     *
+     * A sync map is produced on whichever device recorded the audio, so the key it
+     * carries is that device's path — `Download/Quick Share/Epub/x.epub` against
+     * `Download/Epub/x.epub` here, for example. An exact match therefore almost
+     * never succeeds after transferring the map, and read-along silently never
+     * attaches. Fall back to the file name, which survives the move.
+     */
+    suspend fun getBookByFileKeyOrName(fileKey: String): BookEntity? {
+        bookDao.getBookByFileKey(fileKey)?.let { return it }
+        val raw = fileKey.substringAfterLast('/')
+        if (raw.isBlank()) return null
+        val name = runCatching { Uri.decode(raw) }.getOrDefault(raw)
+        if (name.isBlank()) return null
+        return runCatching { bookDao.getBookByFileKeyEndingWith(name) }.getOrNull()
+    }
+
     suspend fun addSafFolderAndScan(treeUri: Uri): WatchedFolderEntity = withContext(Dispatchers.IO) {
         val doc = DocumentFile.fromTreeUri(context, treeUri)
         val displayName = doc?.name ?: treeUri.lastPathSegment ?: "Book Folder"

@@ -402,11 +402,21 @@ class M4bPlaybackService : Service() {
         if (isInitialLoad) {
             var startPos = entity.lastPositionMs.coerceIn(0L, totalDur.coerceAtLeast(entity.lastPositionMs))
             var inheritedFromLibrary = false
-            if (!entity.sourceEpubKey.isNullOrBlank() && segments.isNotEmpty()) {
+            // Resolve the EPUB on THIS device. The map's key names the recording
+            // device's path, so an exact match normally fails; the reader also has
+            // to open a file that actually exists here.
+            val linkedBook = if (!entity.sourceEpubKey.isNullOrBlank()) {
                 val app = applicationContext as LexiVoiceApplication
-                val linkedBook = withContext(Dispatchers.IO) {
-                    app.libraryRepository.getBookByFileKey(entity.sourceEpubKey)
+                withContext(Dispatchers.IO) {
+                    app.libraryRepository.getBookByFileKeyOrName(entity.sourceEpubKey)
                 }
+            } else {
+                null
+            }
+            val localEpubKey = linkedBook?.fileKey ?: entity.sourceEpubKey
+            val localEpubIsDirect = linkedBook?.isDirectPath ?: entity.sourceEpubIsDirect
+
+            if (!localEpubKey.isNullOrBlank() && segments.isNotEmpty()) {
                 if (linkedBook != null &&
                     (entity.lastPlayedAt == 0L || linkedBook.lastOpenedAt > entity.lastPlayedAt) &&
                     (linkedBook.currentChapterIndex > 0 || linkedBook.currentSentenceIndex > 0)
@@ -444,9 +454,9 @@ class M4bPlaybackService : Service() {
                     currentChapterIndex = chIdx,
                     sleepTimerMode = it.sleepTimerMode,
                     sleepRemainingMs = it.sleepRemainingMs,
-                    sourceEpubKey = entity.sourceEpubKey,
-                    sourceEpubIsDirect = entity.sourceEpubIsDirect,
-                    hasSyncedEpub = !entity.sourceEpubKey.isNullOrBlank() && segments.isNotEmpty(),
+                    sourceEpubKey = localEpubKey,
+                    sourceEpubIsDirect = localEpubIsDirect,
+                    hasSyncedEpub = !localEpubKey.isNullOrBlank() && segments.isNotEmpty(),
                     activeSyncChapterIndex = initialSeg?.chapterIndex ?: 0,
                     activeSyncSentenceIndex = initialSeg?.sentenceIndex ?: -1,
                     activeSyncText = initialSeg?.text.orEmpty()

@@ -54,6 +54,13 @@ interface BookDao {
     @Query("SELECT * FROM books WHERE fileKey = :fileKey LIMIT 1")
     suspend fun getBookByFileKey(fileKey: String): BookEntity?
 
+    /**
+     * Fallback for a key produced on another device. The path does not survive the
+     * move, but the file name does.
+     */
+    @Query("SELECT * FROM books WHERE fileKey LIKE '%' || :fileName ORDER BY lastOpenedAt DESC LIMIT 1")
+    suspend fun getBookByFileKeyEndingWith(fileName: String): BookEntity?
+
     @Query("SELECT * FROM books WHERE folderKey = :folderKey")
     suspend fun getBooksForFolder(folderKey: String): List<BookEntity>
 
