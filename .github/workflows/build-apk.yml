@@ -1,13 +1,15 @@
 name: Build & Publish Signed Release APKs
 
 on:
-  push:
-    branches: [ "main" ]
-    paths-ignore:
-      - 'README.md'
-      - 'docs/**'
-      - '.github/**'
-      - '*.md'
+  # Manual only: run it from the Actions tab when a batch of changes is ready.
+  # Building on every push to main published a release per commit, which meant a
+  # full build and a new tag for work that was still in progress.
+  #
+  # To publish by tagging instead, replace this block with:
+  #   on:
+  #     push:
+  #       tags: [ 'v*' ]
+  #     workflow_dispatch:
   workflow_dispatch:
 
 permissions:
