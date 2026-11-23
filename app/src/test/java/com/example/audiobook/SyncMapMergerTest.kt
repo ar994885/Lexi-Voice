@@ -107,4 +107,13 @@ class SyncMapMergerTest {
         assertFalse(SyncMapMerger.isUpToDate(book("B", "N", listOf(chapter(1, 2))), merged))
         assertTrue(SyncMapMerger.isUpToDate(book("B", "N", merged.chapters), merged))
     }
+
+    @Test
+    fun `isUpToDate notices a chapter that gained sentences`() {
+        val onDisk = book("B", "N", listOf(chapter(1, 2), chapter(2, 2)))
+        val richer = book("B", "N", listOf(chapter(1, 5), chapter(2, 2)))
+
+        assertFalse(SyncMapMerger.isUpToDate(onDisk, richer))
+        assertTrue(SyncMapMerger.isUpToDate(richer, richer))
+    }
 }

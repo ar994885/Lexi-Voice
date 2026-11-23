@@ -56,6 +56,13 @@ object SyncMapMerger {
     fun isUpToDate(consolidated: BookSyncMap?, merged: BookSyncMap): Boolean {
         if (consolidated == null) return false
         if (consolidated.chapters.size != merged.chapters.size) return false
-        return consolidated.chapters.map { it.chapterIndex } == merged.chapters.map { it.chapterIndex }
+        if (consolidated.chapters.map { it.chapterIndex } != merged.chapters.map { it.chapterIndex }) {
+            return false
+        }
+        // Sentence counts count too. A richer sibling map can add sentences to a
+        // chapter that is already present, and comparing only the chapter set left
+        // the consolidated file on disk permanently behind what playback used.
+        val onDisk = consolidated.chapters.associate { it.chapterIndex to it.sentences.size }
+        return merged.chapters.all { onDisk[it.chapterIndex] == it.sentences.size }
     }
 }
