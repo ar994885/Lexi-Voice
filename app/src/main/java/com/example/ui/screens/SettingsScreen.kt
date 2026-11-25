@@ -435,6 +435,52 @@ fun SettingsScreen(
                                 modifier = Modifier.testTag("settings_volume_keys_switch")
                             )
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Show System Notification Bar", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Keep the status bar visible while reading. Turn it off for an edge-to-edge page.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = readerSettings.showSystemStatusBar,
+                                onCheckedChange = { checked ->
+                                    scope.launch {
+                                        prefsRepo.updateReaderSettings { it.copy(showSystemStatusBar = checked) }
+                                    }
+                                },
+                                modifier = Modifier.testTag("settings_status_bar_switch")
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Keep Screen Awake", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Stop the screen from sleeping while the reader is open",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = readerSettings.keepScreenAwake,
+                                onCheckedChange = { checked ->
+                                    scope.launch {
+                                        prefsRepo.updateReaderSettings { it.copy(keepScreenAwake = checked) }
+                                    }
+                                },
+                                modifier = Modifier.testTag("settings_keep_awake_switch")
+                            )
+                        }
                     }
                 }
             }

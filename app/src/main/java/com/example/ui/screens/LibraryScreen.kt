@@ -937,13 +937,20 @@ fun LibraryScreen(
                     ) {
                         Text("Remove from Library Only")
                     }
+                    TextButton(
+                        onClick = { bookToDeleteConfirm = null },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("cancel_delete_book_button")
+                    ) {
+                        Text("Cancel")
+                    }
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { bookToDeleteConfirm = null }) {
-                    Text("Cancel")
-                }
-            }
+            // The two choices are full-width buttons stacked in the confirm slot, so
+            // a dismiss button in the dialog's own row would be laid out beside them
+            // and drawn on top of the second one. Cancel is the third button instead.
+            dismissButton = null
         )
     }
 }

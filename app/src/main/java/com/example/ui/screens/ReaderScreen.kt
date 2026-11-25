@@ -87,6 +87,8 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -339,6 +341,33 @@ fun ReaderScreen(
     val isTtsPlayingThisBook = ttsState.isActive &&
         ttsState.sourceType == TtsSourceType.BOOK &&
         ttsState.bookId == bookId
+
+    // Coming back into a book that is already being read aloud should show the
+    // player bar straight away instead of making the user hunt for the headphones
+    // button. When nothing is being read for this book the reader stays clean.
+    LaunchedEffect(Unit) {
+        if (isTtsPlayingThisBook) showAudioPlayerBar = true
+    }
+
+    // "Keep screen awake" and "Show system notification bar", both off by default
+    // in the sense that the reader never held the screen on and never hid the bar.
+    DisposableEffect(readerSettings.keepScreenAwake) {
+        view.keepScreenOn = readerSettings.keepScreenAwake
+        onDispose { view.keepScreenOn = false }
+    }
+
+    val hostActivity = context.findActivity()
+    DisposableEffect(readerSettings.showSystemStatusBar, hostActivity) {
+        val controller = hostActivity?.let { WindowInsetsControllerCompat(it.window, view) }
+        if (readerSettings.showSystemStatusBar) {
+            controller?.show(WindowInsetsCompat.Type.statusBars())
+        } else {
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.statusBars())
+        }
+        onDispose { controller?.show(WindowInsetsCompat.Type.statusBars()) }
+    }
 
     LaunchedEffect(ttsState.chapterIndex, isTtsPlayingThisBook) {
         if (isTtsPlayingThisBook && ttsState.chapterIndex != uiState.currentChapterIndex) {
