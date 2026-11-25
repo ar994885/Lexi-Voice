@@ -59,7 +59,8 @@ data class ReaderSettings(
     val customThemeLinkHex: String = "#1D60A6",
     val customFontName: String = "",
     val showSystemStatusBar: Boolean = true,
-    val keepScreenAwake: Boolean = false
+    val keepScreenAwake: Boolean = false,
+    val pageTurnSound: Boolean = false
 )
 
 data class TtsSettings(
@@ -112,6 +113,7 @@ class PreferencesRepository(private val context: Context) {
         val CUSTOM_FONT_NAME = stringPreferencesKey("custom_font_name")
         val READER_SHOW_STATUS_BAR = booleanPreferencesKey("reader_show_status_bar")
         val READER_KEEP_AWAKE = booleanPreferencesKey("reader_keep_awake")
+        val READER_PAGE_TURN_SOUND = booleanPreferencesKey("reader_page_turn_sound")
 
         val TTS_ENGINE = stringPreferencesKey("tts_engine")
         val TTS_VOICE = stringPreferencesKey("tts_voice")
@@ -172,7 +174,8 @@ class PreferencesRepository(private val context: Context) {
             customThemeLinkHex = prefs[Keys.CUSTOM_THEME_LINK] ?: "#1D60A6",
             customFontName = prefs[Keys.CUSTOM_FONT_NAME] ?: "",
             showSystemStatusBar = prefs[Keys.READER_SHOW_STATUS_BAR] ?: true,
-            keepScreenAwake = prefs[Keys.READER_KEEP_AWAKE] ?: false
+            keepScreenAwake = prefs[Keys.READER_KEEP_AWAKE] ?: false,
+            pageTurnSound = prefs[Keys.READER_PAGE_TURN_SOUND] ?: false
         )
     }
 
@@ -245,6 +248,7 @@ class PreferencesRepository(private val context: Context) {
             // the transform runs, nothing is stored, and the switch snaps back.
             prefs[Keys.READER_SHOW_STATUS_BAR] = updated.showSystemStatusBar
             prefs[Keys.READER_KEEP_AWAKE] = updated.keepScreenAwake
+            prefs[Keys.READER_PAGE_TURN_SOUND] = updated.pageTurnSound
         }
     }
 
