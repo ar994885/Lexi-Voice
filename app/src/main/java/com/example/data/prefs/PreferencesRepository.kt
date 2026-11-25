@@ -57,7 +57,9 @@ data class ReaderSettings(
     val customThemeBgHex: String = "#FFFDF9",
     val customThemeTextHex: String = "#171A21",
     val customThemeLinkHex: String = "#1D60A6",
-    val customFontName: String = ""
+    val customFontName: String = "",
+    val showSystemStatusBar: Boolean = true,
+    val keepScreenAwake: Boolean = false
 )
 
 data class TtsSettings(
@@ -108,6 +110,8 @@ class PreferencesRepository(private val context: Context) {
         val CUSTOM_THEME_TEXT = stringPreferencesKey("custom_theme_text")
         val CUSTOM_THEME_LINK = stringPreferencesKey("custom_theme_link")
         val CUSTOM_FONT_NAME = stringPreferencesKey("custom_font_name")
+        val READER_SHOW_STATUS_BAR = booleanPreferencesKey("reader_show_status_bar")
+        val READER_KEEP_AWAKE = booleanPreferencesKey("reader_keep_awake")
 
         val TTS_ENGINE = stringPreferencesKey("tts_engine")
         val TTS_VOICE = stringPreferencesKey("tts_voice")
@@ -166,7 +170,9 @@ class PreferencesRepository(private val context: Context) {
             customThemeBgHex = prefs[Keys.CUSTOM_THEME_BG] ?: "#FFFDF9",
             customThemeTextHex = prefs[Keys.CUSTOM_THEME_TEXT] ?: "#171A21",
             customThemeLinkHex = prefs[Keys.CUSTOM_THEME_LINK] ?: "#1D60A6",
-            customFontName = prefs[Keys.CUSTOM_FONT_NAME] ?: ""
+            customFontName = prefs[Keys.CUSTOM_FONT_NAME] ?: "",
+            showSystemStatusBar = prefs[Keys.READER_SHOW_STATUS_BAR] ?: true,
+            keepScreenAwake = prefs[Keys.READER_KEEP_AWAKE] ?: false
         )
     }
 
