@@ -239,6 +239,25 @@ private fun LexiVoiceAppRoot(
     val pendingDeepLink by deepLinkFlow.collectAsStateWithLifecycle()
     var forceReadAlongTrigger by remember { mutableLongStateOf(0L) }
 
+    // An .epub opened from a file manager or a share sheet arrives as a VIEW
+    // intent. Import it into the library and go straight into the reader.
+    LaunchedEffect(Unit) {
+        val intent = (context as? android.app.Activity)?.intent
+        if (intent?.action == Intent.ACTION_VIEW) {
+            val uri = intent.data
+            // Clear it first so a rotation does not import the same file twice.
+            intent.action = null
+            intent.data = null
+            if (uri != null) {
+                libraryViewModel.importSingleEpub(uri) { bookId ->
+                    if (bookId > 0L) {
+                        navController.navigate("reader/$bookId")
+                    }
+                }
+            }
+        }
+    }
+
     val notifLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { _ -> }
