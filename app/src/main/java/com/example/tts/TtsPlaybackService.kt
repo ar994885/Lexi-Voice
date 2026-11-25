@@ -1,5 +1,8 @@
 package com.example.tts
 
+import android.os.SystemClock
+import android.view.KeyEvent
+
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
@@ -53,6 +56,8 @@ class TtsPlaybackService : Service() {
     private var sleepTimerMinutes: Int = 0
 
     private var currentUtteranceId: String = ""
+
+    private var lastProgressWriteAt = 0L
     private var pendingSpeakAfterInit: Boolean = false
     private var pendingTestSpeakText: String? = null
 
@@ -72,6 +77,10 @@ class TtsPlaybackService : Service() {
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LexiVoice::TtsWakeLock")
 
         mediaSession = MediaSessionCompat(this, "LexiVoiceTtsSession").apply {
+            setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                    MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPlay() = resumePlayback()
                 override fun onPause() = pausePlayback()
@@ -81,6 +90,20 @@ class TtsPlaybackService : Service() {
             })
             isActive = true
         }
+        // Route headset and Bluetooth buttons to this service even while the
+        // session is momentarily inactive. Without a media-button receiver the
+        // button can be delivered to the manifest receiver and go nowhere.
+        mediaSession?.setMediaButtonReceiver(
+            MediaButtonReceiver.buildMediaButtonPendingIntent(
+                this,
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                    PlaybackStateCompat.ACTION_PLAY or
+                    PlaybackStateCompat.ACTION_PAUSE or
+                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                    PlaybackStateCompat.ACTION_STOP
+            )
+        )
 
         serviceScope.launch {
             val prefs = (application as LexiVoiceApplication).preferencesRepository.ttsSettings.first()
@@ -101,6 +124,26 @@ class TtsPlaybackService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         MediaButtonReceiver.handleIntent(mediaSession, intent)
+
+        // A headset button that arrives as a raw MEDIA_BUTTON intent is handled
+        // here as well: handleIntent above only replays it into the session, which
+        // is enough when the session is the system's chosen media button session
+        // and does nothing at all when it is not.
+        if (intent?.action == Intent.ACTION_MEDIA_BUTTON) {
+            @Suppress("DEPRECATION")
+            val event = intent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+            if (event != null && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                when (event.keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK ->
+                        if (TtsStateHolder.state.value.isPlaying) pausePlayback() else resumePlayback()
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> resumePlayback()
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> pausePlayback()
+                    KeyEvent.KEYCODE_MEDIA_NEXT -> nextSentence()
+                    KeyEvent.KEYCODE_MEDIA_PREVIOUS -> previousSentence()
+                    KeyEvent.KEYCODE_MEDIA_STOP -> stopPlaybackAndService()
+                }
+            }
+        }
 
         when (intent?.action) {
             ACTION_INIT_ENGINES -> {
@@ -675,6 +718,7 @@ class TtsPlaybackService : Service() {
     private fun pausePlayback() {
         currentUtteranceId = ""
         tts?.stop()
+        flushProgress()
         releaseWakeLock()
         TtsStateHolder.updateState { it.copy(isPlaying = false) }
         updateMediaSessionAndNotification()
@@ -815,9 +859,30 @@ class TtsPlaybackService : Service() {
         stopSelf()
     }
 
+    /** Writes the exact current position, bypassing the throttle above. */
+    private fun flushProgress() {
+        val session = TtsStateHolder.sessionContent ?: return
+        val st = TtsStateHolder.state.value
+        lastProgressWriteAt = 0L
+        persistBookProgress(
+            bookId = session.bookId,
+            chapterIdx = session.currentChapterIndex,
+            sentenceIdx = st.sentenceIndex,
+            totalChapters = session.chapters.size
+        )
+    }
+
     private fun persistBookProgress(bookId: Long, chapterIdx: Int, sentenceIdx: Int, totalChapters: Int) {
         if (bookId <= 0L) return
         val app = application as? LexiVoiceApplication ?: return
+        // TTS finishes a sentence every few seconds. Writing progress on each one
+        // makes the library's Room flows re-emit continuously, and the "Recent
+        // Books" row re-sorts under the user while they look at it -- that is the
+        // flicker on the library screen. Write at most every few seconds; pause
+        // and stop flush the exact position through flushProgress().
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastProgressWriteAt < PROGRESS_WRITE_INTERVAL_MS) return
+        lastProgressWriteAt = now
         serviceScope.launch {
             app.libraryRepository.updateReadingProgress(
                 bookId = bookId,
@@ -955,6 +1020,7 @@ class TtsPlaybackService : Service() {
     companion object {
         private const val TAG = "TtsPlaybackService"
         private const val NOTIFICATION_ID = 4101
+        private const val PROGRESS_WRITE_INTERVAL_MS = 5_000L
 
         const val ACTION_INIT_ENGINES = "com.example.tts.INIT_ENGINES"
         const val ACTION_PLAY_BOOK = "com.example.tts.PLAY_BOOK"
