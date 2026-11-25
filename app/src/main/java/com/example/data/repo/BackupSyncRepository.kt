@@ -29,7 +29,8 @@ data class ImportBackupSummary(
     val addedBookmarks: Int = 0,
     val skippedBookmarks: Int = 0,
     val restoredReadingPositions: Int = 0,
-    val restoredAudiobookPositions: Int = 0
+    val restoredAudiobookPositions: Int = 0,
+    val skippedBookRules: Int = 0
 )
 
 class BackupSyncRepository(
@@ -137,6 +138,10 @@ class BackupSyncRepository(
         val books = database.bookDao().getAllBooksOnce()
         val booksByFileKey = books.associateBy { it.fileKey }
         val booksByTitleLower = books.groupBy { it.title.trim().lowercase() }
+        // A file key can differ between installs even on the same device (a folder
+        // picker hands back a different tree URI). The file name usually survives,
+        // so it is the last fallback before a book rule is dropped.
+        val booksByFileName = books.groupBy { it.fileKey.substringAfterLast('/').lowercase() }
 
         fun resolveBookId(fileKey: String?, title: String?): Long? {
             if (!fileKey.isNullOrBlank()) {
@@ -145,18 +150,26 @@ class BackupSyncRepository(
             if (!title.isNullOrBlank()) {
                 booksByTitleLower[title.trim().lowercase()]?.firstOrNull()?.let { return it.id }
             }
+            if (!fileKey.isNullOrBlank()) {
+                booksByFileName[fileKey.substringAfterLast('/').lowercase()]
+                    ?.firstOrNull()
+                    ?.let { return it.id }
+            }
             return null
         }
 
         var addedRules = 0
         var skippedRules = 0
+        var skippedBookRules = 0
         val existingRules = database.pronunciationRuleDao().getAllRulesOnce().toMutableList()
         val rulesArr = root.optJSONArray("pronunciationRules") ?: JSONArray()
         for (i in 0 until rulesArr.length()) {
             val obj = rulesArr.optJSONObject(i) ?: continue
             val findText = obj.optString("findText").trim()
             val replaceWith = obj.optString("replaceWith").trim()
-            if (findText.isEmpty() || replaceWith.isEmpty()) {
+            // An empty replacement is a real rule: it deletes the matched text before
+            // the engine sees it. Only the find side has to be non-empty.
+            if (findText.isEmpty()) {
                 skippedRules++
                 continue
             }
@@ -171,7 +184,7 @@ class BackupSyncRepository(
                 null
             }
             if (scope == PronunciationScope.BOOK && resolvedBookId == null) {
-                skippedRules++
+                skippedBookRules++
                 continue
             }
             val matchCase = obj.optBoolean("matchCase", false)
@@ -309,7 +322,8 @@ class BackupSyncRepository(
             addedBookmarks = addedBookmarks,
             skippedBookmarks = skippedBookmarks,
             restoredReadingPositions = restoredReadingPositions,
-            restoredAudiobookPositions = restoredAudiobookPositions
+            restoredAudiobookPositions = restoredAudiobookPositions,
+            skippedBookRules = skippedBookRules
         )
     }
 
