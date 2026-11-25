@@ -26,6 +26,28 @@ data class EpubExportResult(
     val errorMessage: String? = null
 )
 
+/**
+ * Metadata written into the exported copy's OPF. Null fields are left as they are,
+ * so exporting without opening the metadata dialog behaves exactly as before.
+ */
+data class EpubMetadataOverride(
+    val title: String? = null,
+    val subtitle: String? = null,
+    val author: String? = null,
+    val publisher: String? = null,
+    val language: String? = null,
+    val date: String? = null,
+    val identifier: String? = null,
+    val rights: String? = null,
+    val series: String? = null,
+    val seriesIndex: String? = null,
+    val subjects: List<String> = emptyList(),
+    val synopsis: String? = null,
+    val coverBytes: ByteArray? = null,
+    val coverFileName: String? = null,
+    val coverMimeType: String? = null
+)
+
 object EpubExporter {
 
     suspend fun exportEditedEpubToUri(
@@ -35,6 +57,7 @@ object EpubExporter {
         bookId: Long?,
         visualRules: List<PronunciationRuleEntity>,
         destinationUri: Uri,
+        metadata: EpubMetadataOverride? = null,
         onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> }
     ): EpubExportResult = withContext(Dispatchers.IO) {
         val opened = EpubParser.openReadableZip(context, sourceFileKey, isDirectPath)
@@ -56,6 +79,7 @@ object EpubExporter {
                     bookId = bookId,
                     visualRules = activeRules,
                     outputStream = stream,
+                    metadata = metadata,
                     onProgress = onProgress
                 )
             }
@@ -72,12 +96,34 @@ object EpubExporter {
         bookId: Long?,
         visualRules: List<PronunciationRuleEntity>,
         outputStream: OutputStream,
+        metadata: EpubMetadataOverride? = null,
         onProgress: (processed: Int, total: Int) -> Unit = { _, _ -> }
     ): EpubExportResult {
         val entriesList = zip.entries().toList().filter { !it.isDirectory }
         val total = entriesList.size.coerceAtLeast(1)
         var processedCount = 0
         var htmlDocsProcessed = 0
+
+        // Where the current cover lives, and whether we have to add one because the
+        // book had none. Resolved before the loop so the OPF rewrite can register it.
+        val opfEntry = entriesList.firstOrNull { it.name.lowercase(Locale.ROOT).endsWith(".opf") }
+        val opfBytesForCover = opfEntry?.let { entry ->
+            runCatching { zip.getInputStream(entry).use { it.readBytes() } }.getOrNull()
+        }
+        val existingCoverEntry = if (opfEntry != null && opfBytesForCover != null) {
+            resolveCoverEntryName(zip, opfEntry.name, opfBytesForCover)
+        } else {
+            null
+        }
+        val coverBytes = metadata?.coverBytes
+        val opfDir = opfEntry?.name?.substringBeforeLast('/', "") ?: ""
+        val addedCoverFileName = if (coverBytes != null && existingCoverEntry == null) {
+            metadata?.coverFileName?.takeIf { it.isNotBlank() } ?: "lexi-cover.jpg"
+        } else {
+            null
+        }
+        val addedCoverHref = addedCoverFileName?.let { if (opfDir.isEmpty()) it else it }
+        val addedCoverId = if (addedCoverHref != null) "lexi-cover-image" else null
 
         ZipOutputStream(BufferedOutputStream(outputStream)).use { zos ->
             // 1. Write `mimetype` FIRST, uncompressed (STORED) per OCF/EPUB specification
@@ -107,7 +153,21 @@ object EpubExporter {
                 val lower = entry.name.lowercase(Locale.ROOT)
                 val isHtmlEntry = lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")
 
-                if (isHtmlEntry && visualRules.isNotEmpty()) {
+                val isOpfEntry = lower.endsWith(".opf")
+
+                if (coverBytes != null && entry.name == existingCoverEntry) {
+                    // Replace the cover image in place, keeping its manifest entry.
+                    val outEntry = ZipEntry(entry.name)
+                    zos.putNextEntry(outEntry)
+                    zos.write(coverBytes)
+                    zos.closeEntry()
+                } else if (isOpfEntry && metadata != null && !metadata.isEmpty()) {
+                    val rawBytes = zip.getInputStream(entry).use { it.readBytes() }
+                    val outEntry = ZipEntry(entry.name)
+                    zos.putNextEntry(outEntry)
+                    zos.write(rewriteOpfMetadata(rawBytes, metadata, addedCoverId, addedCoverHref))
+                    zos.closeEntry()
+                } else if (isHtmlEntry && visualRules.isNotEmpty()) {
                     val rawBytes = zip.getInputStream(entry).use { it.readBytes() }
                     val transformedBytes = transformHtmlDocumentBytes(
                         rawBytes = rawBytes,
@@ -130,6 +190,15 @@ object EpubExporter {
                 }
                 processedCount++
                 onProgress(processedCount, total)
+            }
+
+            // A book with no cover gets one appended next to the OPF, and the rewrite
+            // above already registered it in the manifest and <meta name="cover">.
+            if (coverBytes != null && addedCoverFileName != null && addedCoverHref != null) {
+                val entryName = if (opfDir.isEmpty()) addedCoverFileName else "$opfDir/$addedCoverFileName"
+                zos.putNextEntry(ZipEntry(entryName))
+                zos.write(coverBytes)
+                zos.closeEntry()
             }
         }
 
@@ -184,4 +253,143 @@ object EpubExporter {
         baos.write(doc.outerHtml().toByteArray(StandardCharsets.UTF_8))
         return baos.toByteArray()
     }
+}
+
+private fun EpubMetadataOverride.isEmpty(): Boolean =
+    title.isNullOrBlank() && subtitle.isNullOrBlank() && author.isNullOrBlank() &&
+        publisher.isNullOrBlank() && language.isNullOrBlank() && date.isNullOrBlank() &&
+        identifier.isNullOrBlank() && rights.isNullOrBlank() && series.isNullOrBlank() &&
+        seriesIndex.isNullOrBlank() && subjects.isEmpty() && synopsis.isNullOrBlank() &&
+        coverBytes == null
+
+/** Escapes text for use inside an XML element. */
+private fun String.xmlEscaped(): String = this
+    .replace("&", "&amp;")
+    .replace("<", "&lt;")
+    .replace(">", "&gt;")
+
+/**
+ * Rewrites the OPF of the exported copy. Only the fields that were filled in are
+ * touched, so an export with an empty dialog produces byte-identical metadata.
+ *
+ * [newCoverId] and [newCoverHref] are supplied when the book had no cover and one
+ * was added to the archive; they register the new image in the manifest and point
+ * <meta name="cover"> at it.
+ */
+private fun rewriteOpfMetadata(
+    bytes: ByteArray,
+    metadata: EpubMetadataOverride,
+    newCoverId: String? = null,
+    newCoverHref: String? = null
+): ByteArray {
+    var xml = String(bytes, StandardCharsets.UTF_8)
+
+    fun setTag(tag: String, value: String?) {
+        if (value.isNullOrBlank()) return
+        val escaped = value.xmlEscaped()
+        val pattern = Regex("<" + tag + "([^>]*)>.*?</" + tag + ">", RegexOption.DOT_MATCHES_ALL)
+        xml = if (pattern.containsMatchIn(xml)) {
+            pattern.replace(xml) { match ->
+                "<" + tag + match.groupValues[1] + ">" + escaped + "</" + tag + ">"
+            }
+        } else {
+            val open = Regex("<metadata([^>]*)>")
+            if (open.containsMatchIn(xml)) {
+                open.replaceFirst(xml, "<metadata${'$'}1><" + tag + ">" + escaped + "</" + tag + ">")
+            } else {
+                xml
+            }
+        }
+    }
+
+    /** calibre-style <meta name="..."> entries, replaced or inserted. */
+    fun setMetaName(name: String, value: String?) {
+        if (value.isNullOrBlank()) return
+        val escaped = value.xmlEscaped()
+        val pattern = Regex("<meta\\s+name=\"" + Regex.escape(name) + "\"[^>]*/>", RegexOption.IGNORE_CASE)
+        val replacement = "<meta name=\"" + name + "\" content=\"" + escaped + "\"/>"
+        xml = if (pattern.containsMatchIn(xml)) {
+            pattern.replace(xml, replacement)
+        } else {
+            val open = Regex("<metadata([^>]*)>")
+            if (open.containsMatchIn(xml)) open.replaceFirst(xml, "<metadata${'$'}1>" + replacement) else xml
+        }
+    }
+
+    setTag("dc:title", metadata.title)
+    setTag("dc:creator", metadata.author)
+    setTag("dc:publisher", metadata.publisher)
+    setTag("dc:language", metadata.language)
+    setTag("dc:date", metadata.date)
+    setTag("dc:identifier", metadata.identifier)
+    setTag("dc:rights", metadata.rights)
+    setTag("dc:description", metadata.synopsis)
+
+    // Subtitle is an EPUB3 title refinement. EPUB2 readers ignore it harmlessly.
+    if (!metadata.subtitle.isNullOrBlank()) {
+        val escaped = metadata.subtitle.xmlEscaped()
+        val block = "<dc:title id=\"lexi-subtitle\">" + escaped + "</dc:title>" +
+            "<meta refines=\"#lexi-subtitle\" property=\"title-type\">subtitle</meta>"
+        val open = Regex("<metadata([^>]*)>")
+        if (open.containsMatchIn(xml) && !xml.contains("id=\"lexi-subtitle\"")) {
+            xml = open.replaceFirst(xml, "<metadata${'$'}1>" + block)
+        }
+    }
+
+    // Subjects: the existing dc:subject list is replaced wholesale when any are given.
+    if (metadata.subjects.isNotEmpty()) {
+        val joined = metadata.subjects.joinToString("") { "<dc:subject>" + it.xmlEscaped() + "</dc:subject>" }
+        val existing = Regex("<dc:subject([^>]*)>.*?</dc:subject>", RegexOption.DOT_MATCHES_ALL)
+        xml = if (existing.containsMatchIn(xml)) {
+            existing.replace(xml, "")
+        } else {
+            xml
+        }
+        val open = Regex("<metadata([^>]*)>")
+        if (open.containsMatchIn(xml)) {
+            xml = open.replaceFirst(xml, "<metadata${'$'}1>" + joined)
+        }
+    }
+
+    setMetaName("calibre:series", metadata.series)
+    setMetaName("calibre:series_index", metadata.seriesIndex)
+
+    if (newCoverId != null && newCoverHref != null) {
+        val item = "<item id=\"" + newCoverId + "\" href=\"" + newCoverHref.xmlEscaped() +
+            "\" media-type=\"" + (metadata.coverMimeType ?: "image/jpeg") + "\"/>"
+        val manifestOpen = Regex("<manifest([^>]*)>")
+        if (manifestOpen.containsMatchIn(xml)) {
+            xml = manifestOpen.replaceFirst(xml, "<manifest${'$'}1>" + item)
+        }
+        setMetaName("cover", newCoverId)
+    }
+
+    return xml.toByteArray(StandardCharsets.UTF_8)
+}
+
+/** Manifest href of the current cover image, resolved against the OPF's folder. */
+private fun resolveCoverEntryName(zip: java.util.zip.ZipFile, opfEntryName: String, opfBytes: ByteArray): String? {
+    val xml = String(opfBytes, StandardCharsets.UTF_8)
+    val coverId = Regex("<meta\\s+name=\"cover\"\\s+content=\"([^\"]+)\"", RegexOption.IGNORE_CASE)
+        .find(xml)?.groupValues?.get(1)
+        ?: Regex("name=\"cover\"\\s+content=\"([^\"]+)\"").find(xml)?.groupValues?.get(1)
+        ?: return null
+    val itemPattern = Regex("<item[^>]*id=\"" + Regex.escape(coverId) + "\"[^>]*>", RegexOption.IGNORE_CASE)
+    val item = itemPattern.find(xml)?.value ?: return null
+    val href = Regex("href=\"([^\"]+)\"").find(item)?.groupValues?.get(1) ?: return null
+    val dir = opfEntryName.substringBeforeLast('/', "")
+    val decoded = runCatching { java.net.URLDecoder.decode(href, "UTF-8") }.getOrDefault(href)
+    val joined = if (dir.isEmpty()) decoded else "$dir/$decoded"
+    // Normalise "a/./b" and "a/../b" so it matches the archive entry name.
+    val parts = joined.split('/')
+    val out = ArrayDeque<String>()
+    for (part in parts) {
+        when (part) {
+            "", "." -> Unit
+            ".." -> if (out.isNotEmpty()) out.removeLast()
+            else -> out.addLast(part)
+        }
+    }
+    val resolved = out.joinToString("/")
+    return if (zip.getEntry(resolved) != null) resolved else null
 }
