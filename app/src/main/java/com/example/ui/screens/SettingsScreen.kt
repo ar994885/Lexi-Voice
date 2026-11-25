@@ -600,8 +600,9 @@ fun SettingsScreen(
                                         return@launch
                                     }
                                     val installed = com.example.BuildConfig.VERSION_NAME
-                                    if (!com.example.data.update.UpdateChecker.isNewer(info.versionName, installed)) {
-                                        updateMessage = "You are on the newest build ($installed)."
+                                    if (!com.example.data.update.UpdateChecker.isUpdateAvailable(context, info)) {
+                                        updateMessage = "You are on the newest build. Installed " + installed +
+                                            ", latest release " + info.versionName + "."
                                         updateBusy = false
                                         return@launch
                                     }

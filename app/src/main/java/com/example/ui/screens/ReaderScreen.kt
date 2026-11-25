@@ -365,24 +365,30 @@ fun ReaderScreen(
     }
 
     // Show System Notification Bar hides only the status bar, only while a book is
-    // open, and is fully guarded: a controller on a window that is going away throws
-    // on some OEM builds, which is what took the app down when it was toggled.
+    // open. Two mechanisms on purpose: the insets controller is the modern path but
+    // is a no-op on some builds, and FLAG_FULLSCREEN is the old path that still works
+    // there. Every call is guarded, so a window that is going away cannot crash it.
     DisposableEffect(readerSettings.showSystemStatusBar, hostActivity) {
         val window = hostActivity?.window
         val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
-        if (window != null && controller != null) {
+        if (window != null) {
             runCatching {
                 if (readerSettings.showSystemStatusBar) {
-                    controller.show(WindowInsetsCompat.Type.statusBars())
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+                    controller?.show(WindowInsetsCompat.Type.statusBars())
                 } else {
-                    controller.systemBarsBehavior =
+                    window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+                    controller?.systemBarsBehavior =
                         WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                    controller.hide(WindowInsetsCompat.Type.statusBars())
+                    controller?.hide(WindowInsetsCompat.Type.statusBars())
                 }
             }
         }
         onDispose {
-            runCatching { controller?.show(WindowInsetsCompat.Type.statusBars()) }
+            runCatching {
+                window?.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+                controller?.show(WindowInsetsCompat.Type.statusBars())
+            }
         }
     }
 
