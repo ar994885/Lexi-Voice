@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Playback, Export & Storage Permissions
+
+      Storage model (Play-compliant):
+        * EPUBs are discovered through MediaStore where the platform exposes them,
+          and through Storage Access Framework folders the user grants explicitly.
+        * Audiobooks (.m4b / .mp3) are audio media, so READ_MEDIA_AUDIO on API 33+
+          (and READ_EXTERNAL_STORAGE capped at API 32) lets MediaStore surface them
+          automatically with no folder picking.
+        * MANAGE_EXTERNAL_STORAGE (All Files Access) is deliberately NOT requested:
+          it is a restricted permission that Google Play grants only to a narrow set
+          of app categories, and this app's SAF + MediaStore model does not need it.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Legacy read access, capped so it is not requested on API 33+. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- API 33+ granular media access, used for automatic audiobook discovery. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Required on Android 11+ to discover all installed TTS engines -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".LexiVoiceApplication"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:hasFragileUserData="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.MyApplication">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="standard"
+            android:theme="@style/Theme.MyApplication">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Open an EPUB handed over by a file manager, a download or a share. -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" android:mimeType="application/epub+zip" />
+                <data android:scheme="file" android:mimeType="application/epub+zip" />
+                <data
+                    android:scheme="content"
+                    android:mimeType="application/octet-stream"
+                    android:pathPattern=".*\\.epub" />
+                <data
+                    android:scheme="file"
+                    android:host="*"
+                    android:mimeType="application/octet-stream"
+                    android:pathPattern=".*\\.epub" />
+                <data android:scheme="file" android:host="*" android:pathPattern=".*\\.epub" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".export.ExportChaptersActivity"
+            android:exported="false"
+            android:label="@string/export_audio_mp3"
+            android:theme="@style/Theme.MyApplication" />
+
+        <!--
+          No MEDIA_BUTTON intent-filter here: the service is not exported, so the
+          system could never deliver that broadcast to it. MediaButtonReceiver
+          below is what actually receives media buttons.
+        -->
+        <service
+            android:name=".tts.TtsPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+          Export and M4B compilation produce media rather than syncing data, so
+          they declare mediaPlayback instead of dataSync. dataSync carries a
+          six-hour-per-24h budget on Android 15, which a long novel compile can
+          exceed; mediaPlayback has no such cap.
+        -->
+        <service
+            android:name=".export.AudioExportService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".audiobook.M4bPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".export.M4bCompileService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!--
+          The floating reader overlay must survive while the user is in other
+          apps, so it runs as a foreground service. specialUse is the correct
+          type for a persistent overlay on API 34+; the subtype property is the
+          declaration Play reviews.
+        -->
+        <service
+            android:name=".overlay.FloatingOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Floating quick-access reader and text-to-speech playback overlay controller" />
+        </service>
+
+        <receiver
+            android:name="androidx.media.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
+    </application>
+
+</manifest>
