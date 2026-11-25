@@ -1382,6 +1382,79 @@ internal fun buildThemeInjectionScript(
           if (userEl && userEl.parentNode === parent) {
             parent.appendChild(userEl);
           }
+
+          // ---- motion -------------------------------------------------------
+          // Page turn and chapter transition, ported from the Web Animations
+          // approach used by Arcane Codex: animate the compositor, never the
+          // layout. No class juggling and no forced reflow, so a 30k-word
+          // chapter costs nothing to animate.
+          window.__lexiTurnSound = ${if (settings.pageTurnSound) "true" else "false"};
+
+          window.__lexiAnimate = function (el, frames, opts) {
+            try {
+              if (!el || !el.animate) return;
+              if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+              el.animate(frames, opts);
+            } catch (e) { /* animation is decoration */ }
+          };
+
+          window.lexiPageFade = function () {
+            window.__lexiAnimate(document.body,
+              [{ opacity: 0.35 }, { opacity: 1 }],
+              { duration: 180, easing: 'ease-out' });
+          };
+
+          window.lexiChapterIn = function () {
+            window.__lexiAnimate(document.body,
+              [{ transform: 'translateY(42px)', opacity: 0.25 },
+               { transform: 'translateY(0)', opacity: 1 }],
+              { duration: 420, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
+          };
+
+          // Short filtered-noise paper turn. Silent unless the setting is on.
+          window.lexiTurnSound = function () {
+            if (!window.__lexiTurnSound) return;
+            try {
+              var Ctx = window.AudioContext || window.webkitAudioContext;
+              if (!Ctx) return;
+              var ctx = new Ctx();
+              var n = Math.floor(ctx.sampleRate * 0.085);
+              var buf = ctx.createBuffer(1, n, ctx.sampleRate);
+              var data = buf.getChannelData(0);
+              for (var i = 0; i < n; i++) {
+                data[i] = (Math.random() * 2 - 1) * Math.sin((i / n) * Math.PI) * 0.14;
+              }
+              var src = ctx.createBufferSource();
+              src.buffer = buf;
+              var filter = ctx.createBiquadFilter();
+              filter.type = 'bandpass';
+              filter.frequency.value = 1400;
+              filter.Q.value = 1.2;
+              src.connect(filter);
+              filter.connect(ctx.destination);
+              src.start();
+              src.onended = function () { try { ctx.close(); } catch (e) {} };
+            } catch (e) { /* autoplay policy, ignore */ }
+          };
+
+          // Wrap the page flip once so every flip gets the fade and the sound,
+          // however it was triggered (tap zone, volume key, TTS follow-along).
+          if (!window.__lexiFlipWrapped) {
+            var originalFlip = window.lexiFlipPage;
+            if (typeof originalFlip === 'function') {
+              window.__lexiFlipWrapped = true;
+              window.lexiFlipPage = function (delta) {
+                window.lexiTurnSound();
+                window.lexiPageFade();
+                return originalFlip(delta);
+              };
+            }
+          }
+
+          // A chapter that arrives in scroll mode slides up instead of appearing.
+          if (!${if (isPaged) "true" else "false"}) {
+            window.lexiChapterIn();
+          }
         })();
     """.trimIndent()
 }

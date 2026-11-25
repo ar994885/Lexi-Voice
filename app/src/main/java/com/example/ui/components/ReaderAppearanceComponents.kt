@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.FormatAlignJustify
 import androidx.compose.material.icons.filled.FormatSize
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PlayArrow
@@ -121,6 +122,7 @@ fun ReaderAppearanceBottomBar(
     onOpenTypographySheet: () -> Unit,
     onOpenCustomThemeDialog: () -> Unit,
     onSwitchToAudioBar: () -> Unit,
+    onOpenReaderSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val theme = readerSettings.themeMode
@@ -328,6 +330,21 @@ fun ReaderAppearanceBottomBar(
                             tint = if (isTtsActive) MaterialTheme.colorScheme.primary else theme.text
                         )
                     }
+
+                    // Reader settings, beside the headphones: Visual, Control,
+                    // Metadata, Miscellaneous.
+                    IconButton(
+                        onClick = onOpenReaderSettings,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("reader_bottom_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Reader Settings",
+                            tint = theme.text
+                        )
+                    }
                 }
             }
         }
@@ -412,30 +429,6 @@ fun ReaderTypographySheet(
                 }
             }
 
-            // Volume Keys Page Turning Toggle
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Volume Keys Turn Pages", style = MaterialTheme.typography.titleSmall)
-                    Switch(
-                        checked = readerSettings.volumeKeysTurnPages,
-                        onCheckedChange = { checked ->
-                            onUpdateSettings { it.copy(volumeKeysTurnPages = checked) }
-                        },
-                        modifier = Modifier.testTag("volume_keys_turn_pages_switch")
-                    )
-                }
-            }
-
             // Follow Original Book Styling toggle
             Surface(
                 shape = RoundedCornerShape(14.dp),
@@ -483,51 +476,8 @@ fun ReaderTypographySheet(
             }
 
             // Screen and system-bar behaviour, next to the other reading settings.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text("Show System Notification Bar", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "Keep the status bar visible while reading. Off hides it for the page only.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Switch(
-                    checked = readerSettings.showSystemStatusBar,
-                    onCheckedChange = { checked ->
-                        onUpdateSettings { it.copy(showSystemStatusBar = checked) }
-                    },
-                    modifier = Modifier.testTag("reader_status_bar_switch")
-                )
-            }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text("Keep Screen Awake", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        text = "Stop the screen from sleeping while a book is open",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Switch(
-                    checked = readerSettings.keepScreenAwake,
-                    onCheckedChange = { checked ->
-                        onUpdateSettings { it.copy(keepScreenAwake = checked) }
-                    },
-                    modifier = Modifier.testTag("reader_keep_awake_switch")
-                )
-            }
+
 
             HorizontalDivider()
 
