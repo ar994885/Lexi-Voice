@@ -87,6 +87,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.platform.testTag
@@ -349,24 +350,41 @@ fun ReaderScreen(
         if (isTtsPlayingThisBook) showAudioPlayerBar = true
     }
 
-    // "Keep screen awake" and "Show system notification bar", both off by default
-    // in the sense that the reader never held the screen on and never hid the bar.
-    DisposableEffect(readerSettings.keepScreenAwake) {
-        view.keepScreenOn = readerSettings.keepScreenAwake
-        onDispose { view.keepScreenOn = false }
+    val hostActivity = context.findActivity()
+
+    // Keep Screen Awake is a window flag, not a view flag: a view flag is dropped
+    // every time the reader's view is re-attached, which is why the toggle looked
+    // like it did nothing.
+    DisposableEffect(readerSettings.keepScreenAwake, hostActivity) {
+        val window = hostActivity?.window
+        if (readerSettings.keepScreenAwake) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
-    val hostActivity = context.findActivity()
+    // Show System Notification Bar hides only the status bar, only while a book is
+    // open, and is fully guarded: a controller on a window that is going away throws
+    // on some OEM builds, which is what took the app down when it was toggled.
     DisposableEffect(readerSettings.showSystemStatusBar, hostActivity) {
-        val controller = hostActivity?.let { WindowInsetsControllerCompat(it.window, view) }
-        if (readerSettings.showSystemStatusBar) {
-            controller?.show(WindowInsetsCompat.Type.statusBars())
-        } else {
-            controller?.systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller?.hide(WindowInsetsCompat.Type.statusBars())
+        val window = hostActivity?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        if (window != null && controller != null) {
+            runCatching {
+                if (readerSettings.showSystemStatusBar) {
+                    controller.show(WindowInsetsCompat.Type.statusBars())
+                } else {
+                    controller.systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(WindowInsetsCompat.Type.statusBars())
+                }
+            }
         }
-        onDispose { controller?.show(WindowInsetsCompat.Type.statusBars()) }
+        onDispose {
+            runCatching { controller?.show(WindowInsetsCompat.Type.statusBars()) }
+        }
     }
 
     LaunchedEffect(ttsState.chapterIndex, isTtsPlayingThisBook) {

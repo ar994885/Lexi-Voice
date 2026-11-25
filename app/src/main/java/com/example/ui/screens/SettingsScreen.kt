@@ -222,6 +222,9 @@ fun SettingsScreen(
             }
         }
     }
+    var updateBusy by remember { mutableStateOf(false) }
+    var updateMessage by remember { mutableStateOf("") }
+
     val importBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -230,10 +233,11 @@ fun SettingsScreen(
                 app.backupSyncRepository.importFromUri(uri).fold(
                     onSuccess = { summary ->
                         snackbarHostState.showSnackbar(
-                            "Merged ${summary.addedRules} rule(s) & ${summary.addedBookmarks} bookmark/highlight(s)" +
-                                if (summary.restoredReadingPositions + summary.restoredAudiobookPositions > 0) {
-                                    ", restored ${summary.restoredReadingPositions} reading position(s) & " +
-                                        "${summary.restoredAudiobookPositions} audiobook position(s)"
+                            "Imported ${summary.addedRules} rule(s), ${summary.addedBookmarks} highlight(s), " +
+                                "${summary.restoredReadingPositions} reading position(s) & " +
+                                "${summary.restoredAudiobookPositions} audiobook position(s)" +
+                                if (summary.skippedBookRules > 0) {
+                                    " \u2014 ${summary.skippedBookRules} book rule(s) skipped, their book is not in the library yet"
                                 } else ""
                         )
                     },
@@ -439,52 +443,7 @@ fun SettingsScreen(
                                 modifier = Modifier.testTag("settings_volume_keys_switch")
                             )
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("Show System Notification Bar", style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    "Keep the status bar visible while reading. Turn it off for an edge-to-edge page.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = readerSettings.showSystemStatusBar,
-                                onCheckedChange = { checked ->
-                                    scope.launch {
-                                        prefsRepo.updateReaderSettings { it.copy(showSystemStatusBar = checked) }
-                                    }
-                                },
-                                modifier = Modifier.testTag("settings_status_bar_switch")
-                            )
-                        }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("Keep Screen Awake", style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    "Stop the screen from sleeping while the reader is open",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = readerSettings.keepScreenAwake,
-                                onCheckedChange = { checked ->
-                                    scope.launch {
-                                        prefsRepo.updateReaderSettings { it.copy(keepScreenAwake = checked) }
-                                    }
-                                },
-                                modifier = Modifier.testTag("settings_keep_awake_switch")
-                            )
-                        }
+
                     }
                 }
             }
@@ -604,7 +563,104 @@ fun SettingsScreen(
             item {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "Backup & Sync (Rules & Highlights)",
+                    text = "App Updates",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            item {
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Installed version " + com.example.BuildConfig.VERSION_NAME +
+                                ". Checks the project's GitHub releases page and installs a newer build over this one.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    updateBusy = true
+                                    updateMessage = "Checking for updates\u2026"
+                                    val result = com.example.data.update.UpdateChecker.fetchLatest()
+                                    val info = result.getOrNull()
+                                    if (info == null) {
+                                        updateMessage = "Could not check: " +
+                                            (result.exceptionOrNull()?.message ?: "unknown error")
+                                        updateBusy = false
+                                        return@launch
+                                    }
+                                    val installed = com.example.BuildConfig.VERSION_NAME
+                                    if (!com.example.data.update.UpdateChecker.isNewer(info.versionName, installed)) {
+                                        updateMessage = "You are on the newest build ($installed)."
+                                        updateBusy = false
+                                        return@launch
+                                    }
+                                    updateMessage = "Downloading ${info.versionName}\u2026"
+                                    runCatching {
+                                        com.example.data.update.UpdateChecker.download(context, info) { percent ->
+                                            scope.launch {
+                                                updateMessage = "Downloading ${info.versionName}\u2026 $percent%"
+                                            }
+                                        }
+                                    }.onSuccess { apk ->
+                                        val canInstall = Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                                            context.packageManager.canRequestPackageInstalls()
+                                        if (canInstall) {
+                                            updateMessage = "Downloaded ${info.versionName}. Opening the installer\u2026"
+                                            runCatching {
+                                                com.example.data.update.UpdateChecker.install(context, apk)
+                                            }.onFailure {
+                                                updateMessage = "Could not open the installer: ${it.message}"
+                                            }
+                                        } else {
+                                            updateMessage = "Allow LexiVoice to install unknown apps, then check again."
+                                            runCatching {
+                                                context.startActivity(
+                                                    Intent(
+                                                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                        Uri.parse("package:${context.packageName}")
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }.onFailure {
+                                        updateMessage = "Download failed: ${it.message}"
+                                    }
+                                    updateBusy = false
+                                }
+                            },
+                            enabled = !updateBusy,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("settings_check_updates_button")
+                        ) {
+                            Text(if (updateBusy) "Working\u2026" else "Check for Updates")
+                        }
+                        if (updateMessage.isNotBlank()) {
+                            Text(
+                                text = updateMessage,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "Backup & Sync (Rules, Highlights & Progress)",
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
