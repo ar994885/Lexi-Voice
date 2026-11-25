@@ -27,7 +27,9 @@ data class ImportBackupSummary(
     val addedRules: Int = 0,
     val skippedRules: Int = 0,
     val addedBookmarks: Int = 0,
-    val skippedBookmarks: Int = 0
+    val skippedBookmarks: Int = 0,
+    val restoredReadingPositions: Int = 0,
+    val restoredAudiobookPositions: Int = 0
 )
 
 class BackupSyncRepository(
@@ -86,6 +88,46 @@ class BackupSyncRepository(
                 )
             }
             put("bookmarks", bookmarksArr)
+
+            // Reading positions. Without these a restored backup brings back the
+            // rules and highlights but every book still opens at page one.
+            val progressArr = JSONArray()
+            books.forEach { book ->
+                val started = book.progressPercent > 0f ||
+                    book.currentChapterIndex > 0 ||
+                    book.currentSentenceIndex > 0 ||
+                    book.isFinished
+                if (!started) return@forEach
+                progressArr.put(
+                    JSONObject().apply {
+                        put("title", book.title)
+                        put("fileKey", book.fileKey)
+                        put("chapterIndex", book.currentChapterIndex)
+                        put("sentenceIndex", book.currentSentenceIndex)
+                        put("scrollOffset", book.scrollOffset)
+                        put("progressPercent", book.progressPercent.toDouble())
+                        put("lastOpenedAt", book.lastOpenedAt)
+                        put("isFinished", book.isFinished)
+                    }
+                )
+            }
+            put("readingProgress", progressArr)
+
+            val audioProgressArr = JSONArray()
+            database.audiobookDao().getAllAudiobooksOnce().forEach { audio ->
+                if (audio.lastPositionMs <= 0L) return@forEach
+                audioProgressArr.put(
+                    JSONObject().apply {
+                        put("title", audio.title)
+                        put("fileUri", audio.fileUri)
+                        put("sourceEpubKey", audio.sourceEpubKey ?: JSONObject.NULL)
+                        put("positionMs", audio.lastPositionMs)
+                        put("durationMs", audio.durationMs)
+                        put("lastPlayedAt", audio.lastPlayedAt)
+                    }
+                )
+            }
+            put("audiobookProgress", audioProgressArr)
         }
         root.toString(2)
     }
@@ -219,11 +261,55 @@ class BackupSyncRepository(
             scheduleAutoMirror()
         }
 
+        // Reading positions are restored only when the backup is further along than
+        // this device, so importing an older file never rewinds a book. Files written
+        // by schema v1 have neither array and simply restore nothing here.
+        var restoredReadingPositions = 0
+        val progressArr = root.optJSONArray("readingProgress") ?: JSONArray()
+        for (i in 0 until progressArr.length()) {
+            val obj = progressArr.optJSONObject(i) ?: continue
+            val bookId = resolveBookId(obj.optString("fileKey"), obj.optString("title")) ?: continue
+            val local = books.firstOrNull { it.id == bookId } ?: continue
+            val backupPercent = obj.optDouble("progressPercent", 0.0).toFloat()
+            val backupChapter = obj.optInt("chapterIndex", 0)
+            val backupAhead = backupPercent > local.progressPercent ||
+                (backupPercent >= local.progressPercent && backupChapter > local.currentChapterIndex)
+            if (!backupAhead) continue
+            database.bookDao().updateReadingProgress(
+                bookId = bookId,
+                chapterIndex = backupChapter,
+                sentenceIndex = obj.optInt("sentenceIndex", 0),
+                scrollOffset = obj.optInt("scrollOffset", 0),
+                progressPercent = backupPercent,
+                lastOpenedAt = obj.optLong("lastOpenedAt", local.lastOpenedAt)
+            )
+            restoredReadingPositions++
+        }
+
+        var restoredAudiobookPositions = 0
+        val audioProgressArr = root.optJSONArray("audiobookProgress") ?: JSONArray()
+        for (i in 0 until audioProgressArr.length()) {
+            val obj = audioProgressArr.optJSONObject(i) ?: continue
+            val fileUri = obj.optString("fileUri")
+            if (fileUri.isBlank()) continue
+            val local = database.audiobookDao().getAudiobookByUri(fileUri) ?: continue
+            val positionMs = obj.optLong("positionMs", 0L)
+            if (positionMs <= local.lastPositionMs) continue
+            database.audiobookDao().updatePlaybackProgress(
+                id = local.id,
+                positionMs = positionMs,
+                playedAt = obj.optLong("lastPlayedAt", local.lastPlayedAt)
+            )
+            restoredAudiobookPositions++
+        }
+
         ImportBackupSummary(
             addedRules = addedRules,
             skippedRules = skippedRules,
             addedBookmarks = addedBookmarks,
-            skippedBookmarks = skippedBookmarks
+            skippedBookmarks = skippedBookmarks,
+            restoredReadingPositions = restoredReadingPositions,
+            restoredAudiobookPositions = restoredAudiobookPositions
         )
     }
 
@@ -304,7 +390,7 @@ class BackupSyncRepository(
     }
 
     companion object {
-        const val BACKUP_SCHEMA_VERSION = 1
+        const val BACKUP_SCHEMA_VERSION = 2
         const val AUTO_MIRROR_FILENAME = "lexivoice_sync_backup.json"
     }
 }
