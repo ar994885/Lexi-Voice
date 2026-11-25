@@ -825,7 +825,7 @@ fun PronunciationRuleEditorDialog(
                         applyToReaderText
                     )
                 },
-                enabled = findText.isNotBlank() && replaceWith.isNotBlank() &&
+                enabled = findText.isNotBlank() &&
                     (applyToAudio || applyToReaderText) &&
                     (scopeChoice == PronunciationScope.GLOBAL || (targetBookId ?: -1L) > 0L),
                 modifier = Modifier.testTag("save_pronunciation_rule_button")
