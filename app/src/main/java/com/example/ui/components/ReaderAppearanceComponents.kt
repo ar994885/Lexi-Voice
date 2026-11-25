@@ -482,6 +482,53 @@ fun ReaderTypographySheet(
                 }
             }
 
+            // Screen and system-bar behaviour, next to the other reading settings.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text("Show System Notification Bar", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "Keep the status bar visible while reading. Off hides it for the page only.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = readerSettings.showSystemStatusBar,
+                    onCheckedChange = { checked ->
+                        onUpdateSettings { it.copy(showSystemStatusBar = checked) }
+                    },
+                    modifier = Modifier.testTag("reader_status_bar_switch")
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text("Keep Screen Awake", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        text = "Stop the screen from sleeping while a book is open",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Switch(
+                    checked = readerSettings.keepScreenAwake,
+                    onCheckedChange = { checked ->
+                        onUpdateSettings { it.copy(keepScreenAwake = checked) }
+                    },
+                    modifier = Modifier.testTag("reader_keep_awake_switch")
+                )
+            }
+
             HorizontalDivider()
 
             // Font Size Slider + Steppers (12sp..36sp)
