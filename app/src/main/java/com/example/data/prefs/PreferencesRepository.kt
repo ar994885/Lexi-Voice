@@ -240,6 +240,11 @@ class PreferencesRepository(private val context: Context) {
             prefs[Keys.CUSTOM_THEME_TEXT] = updated.customThemeTextHex
             prefs[Keys.CUSTOM_THEME_LINK] = updated.customThemeLinkHex
             prefs[Keys.CUSTOM_FONT_NAME] = updated.customFontName
+            // Every field is written by hand here, so a field that is added to
+            // ReaderSettings and decoded but not listed below is silently dropped:
+            // the transform runs, nothing is stored, and the switch snaps back.
+            prefs[Keys.READER_SHOW_STATUS_BAR] = updated.showSystemStatusBar
+            prefs[Keys.READER_KEEP_AWAKE] = updated.keepScreenAwake
         }
     }
 
