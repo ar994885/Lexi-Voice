@@ -440,6 +440,7 @@ initialAnchorOnLoad = null
 }
 fun exportEditedEpub(
 destinationUri: Uri,
+metadata: com.example.export.EpubMetadataOverride? = null,
 onResult: (EpubExportResult) -> Unit
 ) {
 val book = _uiState.value.book ?: run {
@@ -456,7 +457,8 @@ sourceFileKey = book.fileKey,
 isDirectPath = book.isDirectPath,
 bookId = book.id,
 visualRules = visualRules,
-destinationUri = destinationUri
+destinationUri = destinationUri,
+metadata = metadata
 )
 onResult(result)
 }
