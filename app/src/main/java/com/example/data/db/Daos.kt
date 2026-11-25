@@ -290,6 +290,9 @@ interface AudiobookDao {
     @Query("SELECT * FROM audiobooks WHERE id = :id LIMIT 1")
     suspend fun getAudiobookById(id: Long): AudiobookEntity?
 
+    @Query("SELECT * FROM audiobooks")
+    suspend fun getAllAudiobooksOnce(): List<AudiobookEntity>
+
     @Query("SELECT * FROM audiobooks WHERE id = :id LIMIT 1")
     fun observeAudiobookById(id: Long): Flow<AudiobookEntity?>
 
