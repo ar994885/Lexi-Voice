@@ -14,7 +14,9 @@ import java.net.URL
 data class UpdateInfo(
     val versionName: String,
     val apkUrl: String,
-    val releaseNotes: String
+    val releaseNotes: String,
+    /** When the release (or its APK asset) was last published, in epoch millis. */
+    val publishedAtMs: Long = 0L
 )
 
 /**
@@ -47,12 +49,14 @@ object UpdateChecker {
                 val tag = root.optString("tag_name").ifBlank { root.optString("name") }
 
                 var apkUrl: String? = null
+                var assetUpdatedAt = 0L
                 val assets = root.optJSONArray("assets")
                 if (assets != null) {
                     for (i in 0 until assets.length()) {
                         val asset = assets.optJSONObject(i) ?: continue
                         if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
                             apkUrl = asset.optString("browser_download_url")
+                            assetUpdatedAt = parseGithubDate(asset.optString("updated_at"))
                             break
                         }
                     }
@@ -62,15 +66,56 @@ object UpdateChecker {
                         "Release ${tag.ifBlank { "latest" }} has no APK attached"
                     )
                 }
+                val publishedAt = maxOf(
+                    parseGithubDate(root.optString("published_at")),
+                    assetUpdatedAt
+                )
                 UpdateInfo(
                     versionName = tag.removePrefix("v").removePrefix("V").trim(),
                     apkUrl = apkUrl,
-                    releaseNotes = root.optString("body").trim()
+                    releaseNotes = root.optString("body").trim(),
+                    publishedAtMs = publishedAt
                 )
             } finally {
                 conn.disconnect()
             }
         }
+    }
+
+    /** GitHub dates look like 2026-11-25T12:34:56Z. */
+    private fun parseGithubDate(raw: String): Long {
+        if (raw.isBlank()) return 0L
+        return runCatching {
+            val fmt = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+            fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+            fmt.parse(raw)?.time ?: 0L
+        }.getOrDefault(0L)
+    }
+
+    /** When the installed APK was last replaced, in epoch millis. */
+    fun installedAtMs(context: Context): Long = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+    }.getOrDefault(0L)
+
+    /**
+     * Whether [info] is worth installing.
+     *
+     * Version strings are not enough here: a release tag and the versionName baked
+     * into the APK are produced by different steps, so a workflow that re-tags every
+     * build can hand back a "newer" version name for an APK that is already
+     * installed. The APK's own install time is the ground truth, so a release counts
+     * as an update only when it was published after the installed APK was written.
+     */
+    fun isUpdateAvailable(context: Context, info: UpdateInfo): Boolean {
+        val installedAt = installedAtMs(context)
+        if (info.publishedAtMs > 0L && installedAt > 0L) {
+            // A minute of slack for clock skew between the runner and the phone.
+            return info.publishedAtMs > installedAt + 60_000L
+        }
+        val installedName = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+        }.getOrDefault("")
+        return isNewer(info.versionName, installedName)
     }
 
     /** True when [remote] is a higher dotted version than [current]. */
