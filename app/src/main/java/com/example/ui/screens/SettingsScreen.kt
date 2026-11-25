@@ -230,7 +230,11 @@ fun SettingsScreen(
                 app.backupSyncRepository.importFromUri(uri).fold(
                     onSuccess = { summary ->
                         snackbarHostState.showSnackbar(
-                            "Merged ${summary.addedRules} rule(s) & ${summary.addedBookmarks} bookmark/highlight(s)"
+                            "Merged ${summary.addedRules} rule(s) & ${summary.addedBookmarks} bookmark/highlight(s)" +
+                                if (summary.restoredReadingPositions + summary.restoredAudiobookPositions > 0) {
+                                    ", restored ${summary.restoredReadingPositions} reading position(s) & " +
+                                        "${summary.restoredAudiobookPositions} audiobook position(s)"
+                                } else ""
                         )
                     },
                     onFailure = { err ->
