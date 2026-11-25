@@ -531,7 +531,15 @@ class TtsPlaybackService : Service() {
                 rawText = sentence.text,
                 rules = rules,
                 bookId = bookIdForRules
-            ).ifBlank { sentence.text }
+            )
+
+            // A chunk with no speakable character in it -- "...", a lone "]",
+            // a divider line, or whatever a rule just emptied -- is rendered
+            // by the engine as a stray vowel or click, not silence.
+            if (spokenText.none { it.isLetterOrDigit() }) {
+                nextSentence()
+                return@launch
+            }
 
             // Pre-flight: on several engines a language with no installed voice
             // data produces silence and never fires onError, so the app would look
