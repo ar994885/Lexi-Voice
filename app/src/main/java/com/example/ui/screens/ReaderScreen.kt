@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
@@ -119,11 +120,19 @@ import com.example.ui.components.InBookSearchSheet
 import com.example.ui.components.ReaderAppearanceBottomBar
 import com.example.ui.components.ReaderAudioPlayerDockedBar
 import com.example.ui.components.ReaderTypographySheet
+import com.example.ui.components.ReaderControlSheet
+import com.example.ui.components.ReaderMetadataDraft
+import com.example.ui.components.ReaderMetadataDialog
+import com.example.ui.components.ReaderMiscSheet
+import com.example.ui.components.ReaderSettingsHubSheet
+import com.example.ui.components.ReaderSettingsPanel
 import com.example.ui.components.TextSelectionActionBar
 import com.example.ui.components.TextSelectionRectInfo
 import com.example.ui.components.TtsControlsModalSheet
 import com.example.ui.theme.ReaderThemeMode
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -179,6 +188,16 @@ fun ReaderScreen(
     var showSearchSheet by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
     var showAppearanceSheet by remember { mutableStateOf(false) }
+    var showReaderSettingsHub by remember { mutableStateOf(false) }
+    var showReaderControlSheet by remember { mutableStateOf(false) }
+    var showReaderMiscSheet by remember { mutableStateOf(false) }
+    var showReaderMetadataDialog by remember { mutableStateOf(false) }
+    // Metadata for the next export only. Never written back to the library.
+    var pendingExportMetadata by remember { mutableStateOf<com.example.export.EpubMetadataOverride?>(null) }
+    var metadataDraft by remember { mutableStateOf(ReaderMetadataDraft()) }
+    var pickedCoverBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var pickedCoverMime by remember { mutableStateOf<String?>(null) }
+    var validationReport by remember { mutableStateOf<com.example.export.EpubValidationReport?>(null) }
     var showCustomCssDialog by remember { mutableStateOf(false) }
     var showCustomThemeDialog by remember { mutableStateOf(false) }
     val fontPickerLauncher = rememberLauncherForActivityResult(
@@ -186,14 +205,35 @@ fun ReaderScreen(
     ) { uri ->
         uri?.let { viewModel.importCustomFont(context, it) }
     }
+    val coverPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val loaded = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val mime = context.contentResolver.getType(uri) ?: "image/jpeg"
+                        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        if (bytes != null) mime to bytes else null
+                    }.getOrNull()
+                }
+                if (loaded != null) {
+                    pickedCoverMime = loaded.first
+                    pickedCoverBytes = loaded.second
+                }
+            }
+        }
+    }
     val exportEditedEpubLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/epub+zip")
     ) { uri ->
         if (uri != null) {
             scope.launch { snackbarHostState.showSnackbar("Exporting edited EPUB...") }
-            viewModel.exportEditedEpub(uri) { result ->
+            viewModel.exportEditedEpub(uri, pendingExportMetadata) { result ->
                 scope.launch {
                     if (result.success) {
+                        // Check what we just wrote, not what we started from.
+                        validationReport = com.example.export.EpubValidator.validate(context, uri)
                         val snackResult = snackbarHostState.showSnackbar(
                             message = "Saved edited EPUB (${result.processedChapters} chapter(s) updated)",
                             actionLabel = "Import Copy to Library",
@@ -863,6 +903,17 @@ fun ReaderScreen(
                                 onDismissRequest = { showMoreMenu = false }
                             ) {
                                 DropdownMenuItem(
+                                    text = { Text("Reader Settings") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Tune, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showReaderSettingsHub = true
+                                    },
+                                    modifier = Modifier.testTag("reader_menu_settings")
+                                )
+                                DropdownMenuItem(
                                     text = {
                                         Text(if (isTtsPlayingThisBook && ttsState.isPlaying) "Pause Read Aloud" else "Read Aloud")
                                     },
@@ -944,8 +995,21 @@ fun ReaderScreen(
                                     enabled = uiState.book != null,
                                     onClick = {
                                         showMoreMenu = false
-                                        val book = uiState.book ?: return@DropdownMenuItem
-                                        exportEditedEpubLauncher.launch("${book.title} (Edited).epub")
+                                        if (uiState.book == null) return@DropdownMenuItem
+                                        // Metadata first: the dialog feeds the export, and
+                                        // cancelling it leaves the original untouched.
+                                        pendingExportMetadata = null
+                                        val openBook = uiState.book
+                                        if (openBook != null) {
+                                            metadataDraft = ReaderMetadataDraft(
+                                                title = openBook.title,
+                                                author = openBook.author,
+                                                language = openBook.language
+                                            )
+                                        }
+                                        pickedCoverBytes = null
+                                        pickedCoverMime = null
+                                        showReaderMetadataDialog = true
                                     },
                                     modifier = Modifier.testTag("reader_export_edited_epub_button")
                                 )
@@ -986,7 +1050,8 @@ fun ReaderScreen(
                     onUpdateSettings = { transform -> viewModel.updateReaderSettings(transform) },
                     onOpenTypographySheet = { showAppearanceSheet = true },
                     onOpenCustomThemeDialog = { showCustomThemeDialog = true },
-                    onSwitchToAudioBar = { showAudioPlayerBar = true }
+                    onSwitchToAudioBar = { showAudioPlayerBar = true },
+                    onOpenReaderSettings = { showReaderSettingsHub = true }
                 )
             }
         }
@@ -1131,6 +1196,89 @@ fun ReaderScreen(
                 }
                 showCustomThemeDialog = false
             }
+        )
+    }
+
+    if (showReaderSettingsHub) {
+        ReaderSettingsHubSheet(
+            onDismiss = { showReaderSettingsHub = false },
+            onOpenPanel = { panel ->
+                showReaderSettingsHub = false
+                when (panel) {
+                    ReaderSettingsPanel.VISUAL -> showAppearanceSheet = true
+                    ReaderSettingsPanel.CONTROL -> showReaderControlSheet = true
+                    ReaderSettingsPanel.METADATA -> showReaderMetadataDialog = true
+                    ReaderSettingsPanel.MISCELLANEOUS -> showReaderMiscSheet = true
+                }
+            }
+        )
+    }
+
+    if (showReaderControlSheet) {
+        ReaderControlSheet(
+            readerSettings = readerSettings,
+            onUpdateSettings = { transform -> viewModel.updateReaderSettings(transform) },
+            onDismiss = { showReaderControlSheet = false }
+        )
+    }
+
+    if (showReaderMiscSheet) {
+        ReaderMiscSheet(
+            readerSettings = readerSettings,
+            onUpdateSettings = { transform -> viewModel.updateReaderSettings(transform) },
+            onDismiss = { showReaderMiscSheet = false }
+        )
+    }
+
+    if (showReaderMetadataDialog && uiState.book != null) {
+        val currentBook = uiState.book!!
+        ReaderMetadataDialog(
+            initial = metadataDraft,
+            coverPreviewModel = pickedCoverBytes ?: currentBook.coverPath,
+            hasPickedCover = pickedCoverBytes != null,
+            onPickCover = { coverPickerLauncher.launch("image/*") },
+            onClearCover = {
+                pickedCoverBytes = null
+                pickedCoverMime = null
+            },
+            onDismiss = { showReaderMetadataDialog = false },
+            onConfirm = { draft ->
+                showReaderMetadataDialog = false
+                metadataDraft = draft
+                pendingExportMetadata = com.example.export.EpubMetadataOverride(
+                    title = draft.title.trim().ifBlank { null },
+                    subtitle = draft.subtitle.trim().ifBlank { null },
+                    author = draft.author.trim().ifBlank { null },
+                    publisher = draft.publisher.trim().ifBlank { null },
+                    language = draft.language.trim().ifBlank { null },
+                    date = draft.date.trim().ifBlank { null },
+                    identifier = draft.identifier.trim().ifBlank { null },
+                    rights = draft.rights.trim().ifBlank { null },
+                    series = draft.series.trim().ifBlank { null },
+                    seriesIndex = draft.seriesIndex.trim().ifBlank { null },
+                    subjects = draft.subjects.split(',')
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() },
+                    synopsis = draft.synopsis.trim().ifBlank { null },
+                    coverBytes = pickedCoverBytes,
+                    coverFileName = when (pickedCoverMime) {
+                        "image/png" -> "lexi-cover.png"
+                        "image/webp" -> "lexi-cover.webp"
+                        "image/gif" -> "lexi-cover.gif"
+                        else -> "lexi-cover.jpg"
+                    },
+                    coverMimeType = pickedCoverMime
+                )
+                val baseName = draft.title.trim().ifBlank { currentBook.title }
+                exportEditedEpubLauncher.launch("$baseName (Edited).epub")
+            }
+        )
+    }
+
+    validationReport?.let { report ->
+        com.example.ui.components.ReaderValidationDialog(
+            report = report,
+            onDismiss = { validationReport = null }
         )
     }
 
