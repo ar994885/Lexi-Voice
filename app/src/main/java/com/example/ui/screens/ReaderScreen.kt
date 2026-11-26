@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Pause
@@ -188,6 +189,7 @@ fun ReaderScreen(
     var showTocSheet by remember { mutableStateOf(false) }
     var showSearchSheet by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
+    var showHighlightsSheet by remember { mutableStateOf(false) }
     var showAppearanceSheet by remember { mutableStateOf(false) }
     var showReaderSettingsHub by remember { mutableStateOf(false) }
     var showReaderControlSheet by remember { mutableStateOf(false) }
@@ -634,13 +636,7 @@ fun ReaderScreen(
                                 if (selectedWordForRule.isNotBlank()) {
                                     clearTextSelection()
                                 } else {
-                                    // The bottom bar shows when chrome is on OR the audio
-                                    // player is up, so hiding the chrome alone left the
-                                    // player visible and a centre tap looked dead while
-                                    // TTS was running. Collapse the player too.
-                                    val hiding = showReaderChrome
                                     showReaderChrome = !showReaderChrome
-                                    if (hiding) showAudioPlayerBar = false
                                 }
                             },
                             onExternalLinkClicked = { url ->
@@ -973,6 +969,20 @@ fun ReaderScreen(
                                     modifier = Modifier.testTag("reader_menu_read_aloud")
                                 )
                                 DropdownMenuItem(
+                                    text = {
+                                        val highlightCount = allBookmarksAndHighlights.count { it.type == "HIGHLIGHT" }
+                                        Text("Highlights ($highlightCount)")
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Highlight, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showHighlightsSheet = true
+                                    },
+                                    modifier = Modifier.testTag("reader_menu_highlights")
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Bookmarks & Highlights (${allBookmarksAndHighlights.size})") },
                                     leadingIcon = {
                                         Icon(Icons.Default.Bookmarks, contentDescription = null)
@@ -1182,6 +1192,19 @@ fun ReaderScreen(
                 viewModel.requestJumpToLocation(bookId, hit.chapterIndex, hit.sentenceIndex)
             },
             onDismiss = { showSearchSheet = false }
+        )
+    }
+
+    if (showHighlightsSheet) {
+        BookmarksAndHighlightsSheet(
+            items = allBookmarksAndHighlights.filter { it.type == "HIGHLIGHT" },
+            title = "Highlights",
+            onJumpToItem = { entry ->
+                showHighlightsSheet = false
+                viewModel.requestJumpToLocation(bookId, entry.chapterIndex, entry.sentenceIndex)
+            },
+            onDeleteItem = { id -> viewModel.deleteBookmarkOrHighlight(id) },
+            onDismiss = { showHighlightsSheet = false }
         )
     }
 
