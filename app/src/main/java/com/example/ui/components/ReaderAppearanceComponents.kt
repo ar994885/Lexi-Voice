@@ -403,32 +403,6 @@ fun ReaderTypographySheet(
                 }
             }
 
-            // Reading Mode (Scroll vs Paged)
-            Text("Reading Mode", style = MaterialTheme.typography.titleSmall)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                ReaderMode.entries.forEach { mode ->
-                    val selected = readerSettings.readingMode == mode
-                    FilterChip(
-                        selected = selected,
-                        onClick = { onUpdateSettings { it.copy(readingMode = mode) } },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = if (mode == ReaderMode.SCROLL) Icons.Default.ViewStream else Icons.Default.ViewCarousel,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        },
-                        label = { Text(mode.label) },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("reader_mode_${mode.name.lowercase()}")
-                    )
-                }
-            }
-
             // Follow Original Book Styling toggle
             Surface(
                 shape = RoundedCornerShape(14.dp),
@@ -1117,7 +1091,8 @@ fun BookmarksAndHighlightsSheet(
     items: List<BookmarkEntity>,
     onJumpToItem: (BookmarkEntity) -> Unit,
     onDeleteItem: (Long) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    title: String = "Bookmarks & Highlights"
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1130,13 +1105,13 @@ fun BookmarksAndHighlightsSheet(
                 .padding(bottom = 24.dp)
         ) {
             Text(
-                text = "Bookmarks & Highlights (${items.size})",
+                text = "$title (${items.size})",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.padding(bottom = 12.dp)
             )
             if (items.isEmpty()) {
                 Text(
-                    text = "No bookmarks or highlights yet. Tap the bookmark icon in the top bar or long-press text to highlight passages.",
+                    text = "Nothing here yet. Select a passage in the text and tap Highlight or Note.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 24.dp)
