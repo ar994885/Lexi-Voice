@@ -864,6 +864,10 @@ class M4bPlaybackService : Service() {
         playlistChapterFiles = emptyList()
         exoPlayer?.stop()
         M4bPlayerStateHolder.updateState { it.copy(isActive = false, isPlaying = false) }
+        // The session kept its last published PlaybackState after this, which left an
+        // idle audiobook player claiming PLAYING and taking the headset button from
+        // the TTS reader.
+        runCatching { mediaSession.isActive = false }
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
