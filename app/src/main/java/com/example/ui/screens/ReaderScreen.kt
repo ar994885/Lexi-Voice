@@ -199,6 +199,8 @@ fun ReaderScreen(
     var pickedCoverBytes by remember { mutableStateOf<ByteArray?>(null) }
     var pickedCoverMime by remember { mutableStateOf<String?>(null) }
     var validationReport by remember { mutableStateOf<com.example.export.EpubValidationReport?>(null) }
+    var noteTargetId by remember { mutableStateOf<Long?>(null) }
+    var noteImageBase64 by remember { mutableStateOf("") }
     // EPUBCheck is optional: 21 MB, downloaded only if the reader asks for it.
     var epubCheckPrompt by remember { mutableStateOf(false) }
     var epubCheckBusy by remember { mutableStateOf(false) }
@@ -210,6 +212,18 @@ fun ReaderScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { viewModel.importCustomFont(context, it) }
+    }
+    val noteImagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val encoded = withContext(Dispatchers.IO) {
+                    com.example.ui.components.NoteImages.encode(context, uri)
+                }
+                if (encoded.isNotBlank()) noteImageBase64 = encoded
+            }
+        }
     }
     val coverPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -594,6 +608,7 @@ fun ReaderScreen(
                                 selectedWordForRule = selected.trim()
                                 selectedSentenceForAction = sentIdx
                             },
+                            onHighlightTapped = { id -> noteTargetId = id },
                             onTextSelectedWithRect = { rectInfo ->
                                 selectionRectInfo = rectInfo
                                 if (rectInfo.text.isNotBlank()) {
@@ -698,7 +713,10 @@ fun ReaderScreen(
                                 viewModel.saveHighlight(
                                     sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
                                     selectedText = selectedWordForRule,
-                                    colorHex = hex
+                                    colorHex = hex,
+                                    startOffset = selectionRectInfo.startOffset,
+                                    endOffset = selectionRectInfo.endOffset,
+                                    highlightAll = false
                                 )
                                 clearTextSelection()
                             },
@@ -1339,6 +1357,37 @@ fun ReaderScreen(
             onSkip = {
                 epubCheckPrompt = false
                 pendingValidationUri = null
+            }
+        )
+    }
+
+    val noteTarget = noteTargetId?.let { id -> allBookmarksAndHighlights.firstOrNull { it.id == id } }
+    if (noteTarget != null) {
+        com.example.ui.components.ReaderNoteDialog(
+            quotedText = noteTarget.selectedText,
+            initialNote = noteTarget.note,
+            initialHighlightAll = noteTarget.highlightAll,
+            imageBase64 = noteImageBase64.ifBlank { noteTarget.noteImage },
+            onPickImage = { noteImagePicker.launch("image/*") },
+            onClearImage = { noteImageBase64 = "" },
+            onDelete = {
+                viewModel.deleteBookmarkOrHighlight(noteTarget.id)
+                noteTargetId = null
+                noteImageBase64 = ""
+            },
+            onDismiss = {
+                noteTargetId = null
+                noteImageBase64 = ""
+            },
+            onConfirm = { note, highlightAll ->
+                viewModel.updateHighlightNote(
+                    id = noteTarget.id,
+                    note = note,
+                    noteImage = noteImageBase64.ifBlank { noteTarget.noteImage },
+                    highlightAll = highlightAll
+                )
+                noteTargetId = null
+                noteImageBase64 = ""
             }
         )
     }
