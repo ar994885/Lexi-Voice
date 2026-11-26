@@ -55,12 +55,21 @@ class LexiVoiceApplication : Application(), Configuration.Provider, ImageLoaderF
     }
 
     /**
-     * LexiVoice is offline-first: it has no INTERNET permission and every cover it
-     * shows comes from a local File, a SAF content:// URI or a bundled resource.
+     * LexiVoice is offline-first by design, but it is no longer offline-only: the
+     * app declares INTERNET and REQUEST_INSTALL_PACKAGES because of two features
+     * the reader has to ask for.
      *
-     * This ImageLoader enforces that at request level, so a cover href that
-     * happens to be an http(s) URL inside an imported EPUB fails fast with a clear
-     * error instead of silently attempting a socket that cannot exist.
+     *   - The in-app updater (data/update/UpdateChecker.kt) reads
+     *     api.github.com and downloads a release asset.
+     *   - The optional EPUBCheck engine (export/EpubCheckRunner.kt) downloads its
+     *     modules from unpkg.com or cdn.jsdelivr.net the first time a reader asks
+     *     for a conformance check, and keeps them in filesDir afterwards.
+     *
+     * Nothing else opens a socket. In particular no cover, font or stylesheet is
+     * ever fetched over the network: this ImageLoader still enforces that at
+     * request level, so a cover href that happens to be an http(s) URL inside an
+     * imported EPUB fails fast with a clear error rather than attempting a request
+     * the reader never asked for.
      *
      * Note: Coil 2.7.0 declares OkHttp as an api dependency of coil-base, so
      * OkHttp cannot be excluded from the graph without replacing Coil itself.
