@@ -183,11 +183,17 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun saveHighlight(sentenceIndex: Int, selectedText: String, colorHex: String) {
+    fun saveHighlight(
+        sentenceIndex: Int,
+        selectedText: String,
+        colorHex: String,
+        startOffset: Int = -1,
+        endOffset: Int = -1,
+        highlightAll: Boolean = false
+    ) {
         val current = _uiState.value
         val book = current.book ?: return
         val chIdx = current.currentChapterIndex
-        val chTitle = current.chapters.getOrNull(chIdx)?.title ?: "Chapter ${chIdx + 1}"
         viewModelScope.launch {
             bookmarkDao.insertBookmark(
                 BookmarkEntity(
@@ -195,10 +201,27 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     chapterIndex = chIdx,
                     sentenceIndex = sentenceIndex.coerceAtLeast(0),
                     selectedText = selectedText.trim(),
-                    note = chTitle,
+                    // The note used to hold the chapter title, which meant every
+                    // highlight opened with a note it never had. It starts empty.
+                    note = "",
                     colorHex = colorHex,
-                    type = "HIGHLIGHT"
+                    type = "HIGHLIGHT",
+                    startOffset = startOffset.coerceAtLeast(0),
+                    endOffset = endOffset.coerceAtLeast(0),
+                    highlightAll = highlightAll
                 )
+            )
+            app.backupSyncRepository.scheduleAutoMirror()
+        }
+    }
+
+    fun updateHighlightNote(id: Long, note: String, noteImage: String, highlightAll: Boolean) {
+        viewModelScope.launch {
+            bookmarkDao.updateBookmarkNote(
+                id = id,
+                note = note.trim(),
+                noteImage = noteImage,
+                highlightAll = highlightAll
             )
             app.backupSyncRepository.scheduleAutoMirror()
         }
