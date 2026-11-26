@@ -510,22 +510,161 @@ object EpubParser {
                         }
                       };
 
+                      // ---- user highlights -------------------------------------
+                      // A highlight is a character range inside one sentence span, not
+                      // the whole span: selecting a word must not paint the line. Ranges
+                      // go through the CSS Custom Highlight API so the DOM is never
+                      // touched, which keeps pagination and TTS spans intact.
+                      window.__lexiHighlightRanges = [];
+
+                      window.lexiTextOffsetWithin = function(span, node, offset) {
+                        try {
+                          var walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT, null);
+                          var total = 0, n;
+                          while ((n = walker.nextNode())) {
+                            if (n === node) return total + offset;
+                            total += n.textContent.length;
+                          }
+                        } catch (e) {}
+                        return -1;
+                      };
+
+                      window.lexiRangeWithin = function(span, start, end, word) {
+                        try {
+                          var nodes = [];
+                          var walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT, null);
+                          var n;
+                          while ((n = walker.nextNode())) nodes.push(n);
+                          if (nodes.length === 0) return null;
+
+                          function locate(target) {
+                            var acc = 0;
+                            for (var i = 0; i < nodes.length; i++) {
+                              var len = nodes[i].textContent.length;
+                              if (target <= acc + len) return { node: nodes[i], offset: target - acc };
+                              acc += len;
+                            }
+                            var last = nodes[nodes.length - 1];
+                            return { node: last, offset: last.textContent.length };
+                          }
+
+                          var s = start, e = end;
+                          if (!(e > s)) {
+                            if (!word) return null;
+                            var full = span.textContent || '';
+                            var at = full.indexOf(word);
+                            if (at < 0) return null;
+                            s = at;
+                            e = at + word.length;
+                          }
+                          var a = locate(s), b = locate(e);
+                          if (!a || !b) return null;
+                          var range = document.createRange();
+                          range.setStart(a.node, Math.max(0, Math.min(a.offset, a.node.textContent.length)));
+                          range.setEnd(b.node, Math.max(0, Math.min(b.offset, b.node.textContent.length)));
+                          return range;
+                        } catch (err) {
+                          return null;
+                        }
+                      };
+
                       window.lexiApplyUserHighlights = function(items) {
                         var existing = document.querySelectorAll('.lexi-s.lexi-user-hl');
                         for (var i = 0; i < existing.length; i++) {
                           existing[i].classList.remove('lexi-user-hl');
                           existing[i].style.backgroundColor = '';
                         }
-                        if (!Array.isArray(items)) return;
+                        window.__lexiHighlightRanges = [];
+                        if (window.CSS && CSS.highlights) {
+                          Array.from(CSS.highlights.keys()).forEach(function(key) {
+                            if (key.indexOf('lexi-hl-') === 0) CSS.highlights.delete(key);
+                          });
+                        }
+                        if (!Array.isArray(items) || items.length === 0) return;
+
+                        var supported = !!(window.CSS && CSS.highlights && window.Highlight);
+                        var groups = {};
                         for (var k = 0; k < items.length; k++) {
                           var item = items[k];
                           var spans = document.querySelectorAll('.lexi-s[data-idx="' + item.sentenceIndex + '"]');
-                          for (var s = 0; s < spans.length; s++) {
-                            spans[s].classList.add('lexi-user-hl');
-                            spans[s].style.backgroundColor = item.colorHex + '66';
+                          for (var s2 = 0; s2 < spans.length; s2++) {
+                            if (!supported) {
+                              // Older WebView: fall back to the sentence, which is the
+                              // behaviour this replaces.
+                              spans[s2].classList.add('lexi-user-hl');
+                              spans[s2].style.backgroundColor = item.colorHex + '66';
+                              continue;
+                            }
+                            var range = window.lexiRangeWithin(spans[s2], item.startOffset, item.endOffset, item.word);
+                            if (!range) continue;
+                            var key = 'lexi-hl-' + String(item.colorHex || '#FFEB3B').replace('#', '');
+                            if (!groups[key]) groups[key] = { color: item.colorHex || '#FFEB3B', hl: new Highlight() };
+                            groups[key].hl.add(range);
+                            window.__lexiHighlightRanges.push({ range: range, id: item.id, colorHex: item.colorHex });
                           }
                         }
+                        // "Highlight all <word> in this book": every other occurrence
+                        // in this chapter carries the same note. Occurrences are found
+                        // per span so each one becomes its own range.
+                        if (supported) {
+                          for (var w = 0; w < items.length; w++) {
+                            var allItem = items[w];
+                            if (!allItem.highlightAll || !allItem.word) continue;
+                            var allKey = 'lexi-hl-' + String(allItem.colorHex || '#FFEB3B').replace('#', '');
+                            if (!groups[allKey]) groups[allKey] = { color: allItem.colorHex || '#FFEB3B', hl: new Highlight() };
+                            var everySpan = document.querySelectorAll('.lexi-s');
+                            for (var q = 0; q < everySpan.length; q++) {
+                              var text = everySpan[q].textContent || '';
+                              var from = 0, at;
+                              while ((at = text.indexOf(allItem.word, from)) >= 0) {
+                                var hit = window.lexiRangeWithin(everySpan[q], at, at + allItem.word.length, allItem.word);
+                                if (hit) {
+                                  groups[allKey].hl.add(hit);
+                                  window.__lexiHighlightRanges.push({ range: hit, id: allItem.id, colorHex: allItem.colorHex });
+                                }
+                                from = at + allItem.word.length;
+                              }
+                            }
+                          }
+                        }
+
+                        Object.keys(groups).forEach(function(key) {
+                          CSS.highlights.set(key, groups[key].hl);
+                          var styleId = 'lexi-style-' + key;
+                          if (!document.getElementById(styleId)) {
+                            var st = document.createElement('style');
+                            st.id = styleId;
+                            st.textContent = '::highlight(' + key + ') { background-color: ' + groups[key].color + '; }';
+                            (document.head || document.documentElement).appendChild(st);
+                          }
+                        });
                       };
+
+                      // Tapping a highlight opens its note. The ranges are plain objects,
+                      // so hit-testing is done against the stored range list.
+                      document.addEventListener('click', function(ev) {
+                        try {
+                          if (!window.__lexiHighlightRanges || window.__lexiHighlightRanges.length === 0) return;
+                          var sel = window.getSelection ? window.getSelection() : null;
+                          if (sel && sel.toString && sel.toString().trim().length > 0) return;
+                          var caret = document.caretRangeFromPoint
+                            ? document.caretRangeFromPoint(ev.clientX, ev.clientY)
+                            : null;
+                          if (!caret) return;
+                          for (var i = 0; i < window.__lexiHighlightRanges.length; i++) {
+                            var entry = window.__lexiHighlightRanges[i];
+                            var r = entry.range;
+                            if (r.isPointInRange(caret.startContainer, caret.startOffset)) {
+                              if (window.LexiBridge && window.LexiBridge.onHighlightTapped) {
+                                window.LexiBridge.onHighlightTapped(String(entry.id));
+                              }
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              return;
+                            }
+                          }
+                        } catch (e) {}
+                      }, true);
 
                       window.lexiGetVisibleSentenceIndex = function() {
                         var spans = document.querySelectorAll('.lexi-s');
@@ -650,13 +789,26 @@ var lexiEmitSelection = function() {
         if (!isNaN(parsed)) sentIdx = parsed;
       }
       window.__lexiLastSelectedSentIdx = sentIdx;
+      window.__lexiLastSelectedSpan = span || null;
       lexiHadSelection = true;
       var vw = Math.max(1, window.innerWidth || document.documentElement.clientWidth || 1);
       var vh = Math.max(1, window.innerHeight || document.documentElement.clientHeight || 1);
       if (window.LexiBridge && window.LexiBridge.onTextSelectedWithRect) {
+        var offsetStart = -1;
+        var offsetEnd = -1;
+        try {
+          var sentSpan = window.__lexiLastSelectedSpan;
+          var r0 = sel.getRangeAt(0);
+          if (sentSpan) {
+            offsetStart = window.lexiTextOffsetWithin(sentSpan, r0.startContainer, r0.startOffset);
+            offsetEnd = window.lexiTextOffsetWithin(sentSpan, r0.endContainer, r0.endOffset);
+          }
+        } catch (e0) {}
         var payloadJson = JSON.stringify({
           text: sel,
           sentenceIndex: sentIdx,
+          startOffset: offsetStart,
+          endOffset: offsetEnd,
           top: rect ? rect.top : 0,
           bottom: rect ? rect.bottom : 0,
           left: rect ? rect.left : 0,
