@@ -636,7 +636,13 @@ fun ReaderScreen(
                                 if (selectedWordForRule.isNotBlank()) {
                                     clearTextSelection()
                                 } else {
+                                    // The bottom bar shows when chrome is on OR the audio
+                                    // player is up, so hiding the chrome alone left the
+                                    // player visible and a centre tap looked dead while
+                                    // TTS was running. Collapse the player too.
+                                    val hiding = showReaderChrome
                                     showReaderChrome = !showReaderChrome
+                                    if (hiding) showAudioPlayerBar = false
                                 }
                             },
                             onExternalLinkClicked = { url ->
