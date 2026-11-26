@@ -200,6 +200,8 @@ fun ReaderScreen(
     var pickedCoverMime by remember { mutableStateOf<String?>(null) }
     var validationReport by remember { mutableStateOf<com.example.export.EpubValidationReport?>(null) }
     var noteTargetId by remember { mutableStateOf<Long?>(null) }
+    var noteDraftOpen by remember { mutableStateOf(false) }
+    var noteDraftImage by remember { mutableStateOf("") }
     var noteImageBase64 by remember { mutableStateOf("") }
     // EPUBCheck is optional: 21 MB, downloaded only if the reader asks for it.
     var epubCheckPrompt by remember { mutableStateOf(false) }
@@ -709,6 +711,7 @@ fun ReaderScreen(
                         TextSelectionActionBar(
                             selectedText = selectedWordForRule,
                             canReadFromHere = selectedSentenceForAction >= 0,
+                            onAddNote = { noteDraftOpen = true },
                             onHighlightColor = { hex ->
                                 viewModel.saveHighlight(
                                     sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
@@ -1357,6 +1360,38 @@ fun ReaderScreen(
             onSkip = {
                 epubCheckPrompt = false
                 pendingValidationUri = null
+            }
+        )
+    }
+
+    if (noteDraftOpen) {
+        com.example.ui.components.ReaderNoteDialog(
+            quotedText = selectedWordForRule,
+            initialNote = "",
+            initialHighlightAll = false,
+            imageBase64 = noteDraftImage,
+            isNew = true,
+            onPickImage = { noteImagePicker.launch("image/*") },
+            onClearImage = { noteDraftImage = "" },
+            onDelete = { noteDraftOpen = false },
+            onDismiss = {
+                noteDraftOpen = false
+                noteDraftImage = ""
+            },
+            onConfirm = { note, highlightAll ->
+                viewModel.saveHighlight(
+                    sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
+                    selectedText = selectedWordForRule,
+                    colorHex = "#FFEB3B",
+                    startOffset = selectionRectInfo.startOffset,
+                    endOffset = selectionRectInfo.endOffset,
+                    highlightAll = highlightAll,
+                    note = note,
+                    noteImage = noteDraftImage
+                )
+                noteDraftOpen = false
+                noteDraftImage = ""
+                clearTextSelection()
             }
         )
     }
