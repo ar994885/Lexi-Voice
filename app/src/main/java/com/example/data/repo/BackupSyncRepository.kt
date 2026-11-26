@@ -85,6 +85,12 @@ class BackupSyncRepository(
                         put("colorHex", bm.colorHex)
                         put("type", bm.type)
                         put("createdAt", bm.createdAt)
+                        put("startOffset", bm.startOffset)
+                        put("endOffset", bm.endOffset)
+                        put("highlightAll", bm.highlightAll)
+                        // A downscaled JPEG as base64: around 20-40 KB, so a whole
+                        // notebook of images still fits in the JSON.
+                        put("noteImage", bm.noteImage)
                     }
                 )
             }
@@ -243,13 +249,18 @@ class BackupSyncRepository(
             val colorHex = obj.optString("colorHex", "#FFEB3B")
             val type = obj.optString("type", "HIGHLIGHT")
             val createdAt = obj.optLong("createdAt", System.currentTimeMillis())
+            val startOffset = obj.optInt("startOffset", 0)
+            val endOffset = obj.optInt("endOffset", 0)
+            val highlightAll = obj.optBoolean("highlightAll", false)
+            val noteImage = obj.optString("noteImage", "")
 
             val isDup = existingBookmarks.any { existing ->
                 existing.bookId == resolvedBookId &&
                     existing.chapterIndex == chapterIndex &&
                     existing.sentenceIndex == sentenceIndex &&
                     existing.type == type &&
-                    existing.selectedText.trim() == selectedText
+                    existing.selectedText.trim() == selectedText &&
+                    existing.startOffset == startOffset
             }
             if (isDup) {
                 skippedBookmarks++
@@ -263,7 +274,11 @@ class BackupSyncRepository(
                 note = note,
                 colorHex = colorHex,
                 type = type,
-                createdAt = createdAt
+                createdAt = createdAt,
+                startOffset = startOffset,
+                endOffset = endOffset,
+                noteImage = noteImage,
+                highlightAll = highlightAll
             )
             val insertedId = database.bookmarkDao().insertBookmark(entity)
             existingBookmarks.add(entity.copy(id = insertedId))
