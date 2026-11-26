@@ -1412,18 +1412,31 @@ internal fun buildThemeInjectionScript(
           // chapter costs nothing to animate.
           window.__lexiTurnSound = ${if (settings.pageTurnSound) "true" else "false"};
 
-          window.__lexiAnimate = function (el, frames, opts) {
+          window.__lexiAnimateRaw = function (el, frames, opts) {
             try {
               if (!el || !el.animate) return;
-              if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
               el.animate(frames, opts);
             } catch (e) { /* animation is decoration */ }
           };
 
+          // Honours the system "remove animations" setting for movement. A short
+          // opacity change is not movement, so the page turn uses the raw call.
+          window.__lexiAnimate = function (el, frames, opts) {
+            try {
+              if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+              window.__lexiAnimateRaw(el, frames, opts);
+            } catch (e) { /* animation is decoration */ }
+          };
+
           window.lexiPageFade = function () {
-            window.__lexiAnimate(document.body,
-              [{ opacity: 0.35 }, { opacity: 1 }],
-              { duration: 180, easing: 'ease-out' });
+            var frames = [{ opacity: 0.35 }, { opacity: 1 }];
+            var opts = { duration: 180, easing: 'ease-out' };
+            // In paged mode the columns live on body and the scroll container is
+            // html, so both are faded; whichever one is painting gets the effect.
+            window.__lexiAnimateRaw(document.documentElement, frames, opts);
+            if (document.body && document.body !== document.documentElement) {
+              window.__lexiAnimateRaw(document.body, frames, opts);
+            }
           };
 
           window.lexiChapterIn = function () {
