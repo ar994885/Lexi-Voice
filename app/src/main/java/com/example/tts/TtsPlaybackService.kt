@@ -58,6 +58,13 @@ class TtsPlaybackService : Service() {
     private var currentUtteranceId: String = ""
 
     private var lastProgressWriteAt = 0L
+
+    /**
+     * Which way we are walking the sentence list. Skipping a chunk with nothing
+     * speakable in it has to continue in the same direction: going back onto a
+     * lone "]" used to skip forward again, so "previous" appeared stuck.
+     */
+    private var skipDirectionBackward = false
     private var pendingSpeakAfterInit: Boolean = false
     private var pendingTestSpeakText: String? = null
 
@@ -469,6 +476,7 @@ class TtsPlaybackService : Service() {
     }
 
     private fun playFromSentence(sentenceIndex: Int, sourceType: TtsSourceType) {
+        skipDirectionBackward = false
         val session = TtsStateHolder.sessionContent ?: return
         if (session.sentences.isEmpty()) return
 
@@ -580,9 +588,12 @@ class TtsPlaybackService : Service() {
             // a divider line, or whatever a rule just emptied -- is rendered
             // by the engine as a stray vowel or click, not silence.
             if (spokenText.none { it.isLetterOrDigit() }) {
-                nextSentence()
+                if (skipDirectionBackward) previousSentence() else nextSentence()
                 return@launch
             }
+            // Something is actually being spoken, so the next automatic skip starts
+            // from a clean slate.
+            skipDirectionBackward = false
 
             // Pre-flight: on several engines a language with no installed voice
             // data produces silence and never fires onError, so the app would look
@@ -663,6 +674,9 @@ class TtsPlaybackService : Service() {
     }
 
     private fun loadAndPlayChapter(targetChapterIdx: Int, startAtEnd: Boolean) {
+        // A chapter boundary ends the backward walk, so a run of unreadable chunks
+        // can never walk the reader back through the whole book.
+        skipDirectionBackward = false
         val session = TtsStateHolder.sessionContent ?: return
         if (targetChapterIdx !in session.chapters.indices) return
         val chapterSummary = session.chapters[targetChapterIdx]
@@ -739,6 +753,7 @@ class TtsPlaybackService : Service() {
     private fun nextSentence() {
         val session = TtsStateHolder.sessionContent ?: return
         val st = TtsStateHolder.state.value
+        skipDirectionBackward = false
         val next = st.sentenceIndex + 1
         if (next < session.sentences.size) {
             TtsStateHolder.updateState { it.copy(sentenceIndex = next) }
@@ -766,6 +781,7 @@ class TtsPlaybackService : Service() {
     private fun previousSentence() {
         val session = TtsStateHolder.sessionContent ?: return
         val st = TtsStateHolder.state.value
+        skipDirectionBackward = true
         val prev = st.sentenceIndex - 1
         if (prev >= 0) {
             TtsStateHolder.updateState { it.copy(sentenceIndex = prev) }
