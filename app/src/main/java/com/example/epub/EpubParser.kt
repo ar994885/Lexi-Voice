@@ -678,7 +678,24 @@ object EpubParser {
                           for (var i = 0; i < window.__lexiHighlightRanges.length; i++) {
                             var entry = window.__lexiHighlightRanges[i];
                             var r = entry.range;
-                            if (r.isPointInRange(caret.startContainer, caret.startOffset)) {
+                            if (!r.isPointInRange(caret.startContainer, caret.startOffset)) continue;
+                            // caretRangeFromPoint snaps to the nearest text, so a tap
+                            // in the margin still lands "inside" the range. Require the
+                            // point to be over the painted highlight itself.
+                            var painted = r.getClientRects ? r.getClientRects() : null;
+                            var overHighlight = false;
+                            if (painted) {
+                              for (var q = 0; q < painted.length; q++) {
+                                var box = painted[q];
+                                if (ev.clientX >= box.left - 2 && ev.clientX <= box.right + 2 &&
+                                    ev.clientY >= box.top - 2 && ev.clientY <= box.bottom + 2) {
+                                  overHighlight = true;
+                                  break;
+                                }
+                              }
+                            }
+                            if (!overHighlight) continue;
+                            {
                               if (window.LexiBridge && window.LexiBridge.onHighlightTapped) {
                                 window.LexiBridge.onHighlightTapped(String(entry.id));
                               }
@@ -754,18 +771,10 @@ object EpubParser {
                               return;
                             }
                           }
-                          var vw = getPageWidth();
-                          var x = ev.clientX || 0;
-                          if (window.__lexiPagedMode) {
-                            if (x < vw * 0.25) {
-                              window.lexiFlipPage(-1);
-                              return;
-                            }
-                            if (x > vw * 0.75) {
-                              window.lexiFlipPage(1);
-                              return;
-                            }
-                          }
+                          // No tap zones. Every tap is a centre tap: it toggles the
+                          // reader chrome. Pages turn by swiping (handled natively in
+                          // EpubWebView) and by the arrows in the player bar, so a tap
+                          // never has to guess which third of the screen it landed in.
                           var span = ev.target && ev.target.closest ? ev.target.closest('.lexi-s') : null;
                           var sentIdx = -1;
                           if (span) {
