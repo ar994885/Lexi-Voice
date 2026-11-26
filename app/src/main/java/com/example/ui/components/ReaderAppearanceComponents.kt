@@ -1034,7 +1034,7 @@ fun TextSelectionActionBar(
             modifier = Modifier.size(15.dp)
         )
                     }
-                }
+                
             }
 
             if (selectedText.length <= 280) {
