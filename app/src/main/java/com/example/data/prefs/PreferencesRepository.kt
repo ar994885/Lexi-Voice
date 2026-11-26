@@ -146,9 +146,10 @@ class PreferencesRepository(private val context: Context) {
         val textAlign = prefs[Keys.READER_TEXT_ALIGN]?.let { raw ->
             runCatching { ReaderTextAlign.valueOf(raw) }.getOrNull()
         } ?: ReaderTextAlign.PUBLISHER
-        val readingMode = prefs[Keys.READER_MODE]?.let { raw ->
-            runCatching { ReaderMode.valueOf(raw) }.getOrNull()
-        } ?: ReaderMode.SCROLL
+        // Paged mode is retired. A stored PAGED value is read as SCROLL so an
+        // existing install cannot fall back into it; the enum stays because the
+        // column layout it drives is still compiled.
+        val readingMode = ReaderMode.SCROLL
         val rawBrightness = prefs[Keys.READER_BRIGHTNESS] ?: -1f
         val brightness = if (rawBrightness < 0f) -1f else rawBrightness.coerceIn(0.05f, 1.0f)
 
