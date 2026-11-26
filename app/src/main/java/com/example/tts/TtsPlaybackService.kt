@@ -584,10 +584,16 @@ class TtsPlaybackService : Service() {
                 bookId = bookIdForRules
             )
 
-            // A chunk with no speakable character in it -- "...", a lone "]",
-            // a divider line, or whatever a rule just emptied -- is rendered
-            // by the engine as a stray vowel or click, not silence.
-            if (spokenText.none { it.isLetterOrDigit() }) {
+            // Brackets are stripped before the engine sees the text. Since orphan
+            // closers are now merged into the sentence that owns them, a "]" reaches
+            // the engine mid-utterance, and these engines voice a lone bracket as a
+            // stray vowel -- the "uh-" that came back after that merge.
+            val speakableText = sanitizeForSpeech(spokenText)
+
+            // A chunk with no speakable character in it -- "...", a divider line, or
+            // whatever a rule just emptied -- is rendered by the engine as a stray
+            // vowel or click, not silence.
+            if (speakableText.none { it.isLetterOrDigit() }) {
                 if (skipDirectionBackward) previousSentence() else nextSentence()
                 return@launch
             }
@@ -618,7 +624,7 @@ class TtsPlaybackService : Service() {
             }
             engine.setSpeechRate(latestState.speechRate)
             engine.setPitch(latestState.pitch)
-            engine.speak(spokenText, TextToSpeech.QUEUE_FLUSH, params, currentUtteranceId)
+            engine.speak(speakableText, TextToSpeech.QUEUE_FLUSH, params, currentUtteranceId)
         }
 
         updateMediaSessionAndNotification()
@@ -888,6 +894,20 @@ class TtsPlaybackService : Service() {
         )
     }
 
+    /**
+     * Removes the punctuation these engines vocalise. Square, corner, angle and
+     * fullwidth brackets carry no sound in a spoken sentence, but a TTS engine fed
+     * one will emit a short vowel or click for it. The reader still shows them.
+     */
+    private fun sanitizeForSpeech(text: String): String {
+        if (text.isEmpty()) return text
+        val builder = StringBuilder(text.length)
+        for (ch in text) {
+            if (ch in SPEECH_UNSPOKEN) builder.append(' ') else builder.append(ch)
+        }
+        return builder.toString().replace(Regex("\\s+"), " ").trim()
+    }
+
     private fun persistBookProgress(bookId: Long, chapterIdx: Int, sentenceIdx: Int, totalChapters: Int) {
         if (bookId <= 0L) return
         val app = application as? LexiVoiceApplication ?: return
@@ -1037,6 +1057,10 @@ class TtsPlaybackService : Service() {
         private const val TAG = "TtsPlaybackService"
         private const val NOTIFICATION_ID = 4101
         private const val PROGRESS_WRITE_INTERVAL_MS = 5_000L
+
+        /** Brackets and braces, in every form these books use. */
+        private val SPEECH_UNSPOKEN: Set<Char> =
+            "[]{}()（）［］【】《》〈〉「」『』｛｝〔〕〖〗〘〙〚〛".toSet()
 
         const val ACTION_INIT_ENGINES = "com.example.tts.INIT_ENGINES"
         const val ACTION_PLAY_BOOK = "com.example.tts.PLAY_BOOK"
