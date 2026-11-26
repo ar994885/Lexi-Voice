@@ -943,6 +943,7 @@ fun TextSelectionActionBar(
     selectedText: String,
     canReadFromHere: Boolean,
     onHighlightColor: (String) -> Unit,
+    onAddNote: () -> Unit = {},
     onReadAloudFromHere: () -> Unit,
     onDefineSelection: () -> Unit,
     onAddPronunciationRule: () -> Unit,
@@ -1007,6 +1008,16 @@ fun TextSelectionActionBar(
             )
 
             if (canReadFromHere) {
+                // Note sits next to Highlight, the way Moon+ orders its menu:
+                // the colour swatches highlight, this one highlights and opens a note.
+                TextButton(
+                    onClick = onAddNote,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.testTag("selection_add_note_button")
+                ) {
+                    Text("Note", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                }
+
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,

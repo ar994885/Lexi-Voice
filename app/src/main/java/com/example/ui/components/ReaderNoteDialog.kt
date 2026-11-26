@@ -56,6 +56,7 @@ fun ReaderNoteDialog(
     initialNote: String,
     initialHighlightAll: Boolean,
     imageBase64: String,
+    isNew: Boolean = false,
     onPickImage: () -> Unit,
     onClearImage: () -> Unit,
     onDelete: () -> Unit,
@@ -152,11 +153,13 @@ fun ReaderNoteDialog(
         },
         dismissButton = {
             Row {
-                TextButton(
-                    onClick = onDelete,
-                    modifier = Modifier.testTag("reader_note_delete")
-                ) {
-                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                if (!isNew) {
+                    TextButton(
+                        onClick = onDelete,
+                        modifier = Modifier.testTag("reader_note_delete")
+                    ) {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                    }
                 }
                 TextButton(
                     onClick = onDismiss,
