@@ -94,6 +94,46 @@ class TtsPlaybackService : Service() {
                 override fun onSkipToNext() = nextSentence()
                 override fun onSkipToPrevious() = previousSentence()
                 override fun onStop() = stopPlaybackAndService()
+
+                /**
+                 * Handled here as well as in onStartCommand, because a headset button
+                 * arrives by one of two routes depending on the OEM and on whether the
+                 * session is the system's chosen media-button session. Consuming the
+                 * key here covers the case where the session gets it and the
+                 * transport-control callbacks above are skipped.
+                 */
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    if (event != null && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        when (event.keyCode) {
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> {
+                                if (TtsStateHolder.state.value.isPlaying) pausePlayback() else resumePlayback()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                                pausePlayback()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                                resumePlayback()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                                nextSentence()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                previousSentence()
+                                return true
+                            }
+                            KeyEvent.KEYCODE_MEDIA_STOP -> {
+                                stopPlaybackAndService()
+                                return true
+                            }
+                        }
+                    }
+                    return super.onMediaButtonEvent(mediaButtonIntent)
+                }
             })
             isActive = true
         }
