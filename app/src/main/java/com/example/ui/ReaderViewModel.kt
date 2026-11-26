@@ -189,7 +189,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         colorHex: String,
         startOffset: Int = -1,
         endOffset: Int = -1,
-        highlightAll: Boolean = false
+        highlightAll: Boolean = false,
+        note: String = "",
+        noteImage: String = ""
     ) {
         val current = _uiState.value
         val book = current.book ?: return
@@ -202,8 +204,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     sentenceIndex = sentenceIndex.coerceAtLeast(0),
                     selectedText = selectedText.trim(),
                     // The note used to hold the chapter title, which meant every
-                    // highlight opened with a note it never had. It starts empty.
-                    note = "",
+                    // highlight opened with a note it never had.
+                    note = note.trim(),
+                    noteImage = noteImage,
                     colorHex = colorHex,
                     type = "HIGHLIGHT",
                     startOffset = startOffset.coerceAtLeast(0),
