@@ -786,6 +786,9 @@ class TtsPlaybackService : Service() {
 
     private fun resumePlayback() {
         val session = TtsStateHolder.sessionContent ?: return
+        // Back into the media-button stack: a session deactivated on stop has to be
+        // reactivated, or the headset button keeps going to whoever else is there.
+        mediaSession?.isActive = true
         if (session.sentences.isEmpty()) return
         FloatingOverlayController.markActiveSource(UnifiedOverlaySource.TTS)
         if (M4bPlayerStateHolder.state.value.isPlaying) {
@@ -918,6 +921,9 @@ class TtsPlaybackService : Service() {
             )
         }
         stopForeground(STOP_FOREGROUND_REMOVE)
+        // Leave the media-button stack. Two services in this app keep a session, and
+        // an idle one that still claims PLAYING wins the headset button.
+        mediaSession?.isActive = false
         stopSelf()
     }
 
