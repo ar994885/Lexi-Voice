@@ -21,7 +21,9 @@ data class EpubIssue(
 data class EpubValidationReport(
     val errors: List<EpubIssue>,
     val warnings: List<EpubIssue>,
-    val checkedEntries: Int
+    val checkedEntries: Int,
+    /** Which checker produced this: EPUBCheck's version, or the built-in one. */
+    val engine: String = "built-in structural checker"
 ) {
     val isClean: Boolean get() = errors.isEmpty()
 
@@ -223,11 +225,65 @@ object EpubValidator {
         return EpubValidationReport(errors, warnings, names.size)
     }
 
-    private fun parseXml(bytes: ByteArray) = DocumentBuilderFactory.newInstance().apply {
-        isNamespaceAware = false
-        isExpandEntityReferences = false
-        setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
-    }.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+    /**
+     * Parses a document for well-formedness.
+     *
+     * XHTML in the wild uses HTML named entities (&nbsp;, &mdash;, ...) that plain
+     * XML has no definition for, and a strict parser rejects them. EPUBCheck
+     * resolves them through the XHTML DTD, so reporting them as errors here was a
+     * false positive; the entities are substituted before parsing instead.
+     */
+    private fun parseXml(bytes: ByteArray): org.w3c.dom.Document {
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = false
+            isExpandEntityReferences = false
+            setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
+        }
+        val builder = factory.newDocumentBuilder()
+        builder.setEntityResolver { _, _ ->
+            org.xml.sax.InputSource(java.io.StringReader(""))
+        }
+        return builder.parse(ByteArrayInputStream(substituteHtmlEntities(bytes)))
+    }
+
+    private val HTML_ENTITIES = mapOf(
+        "nbsp" to "\u00A0", "mdash" to "\u2014", "ndash" to "\u2013",
+        "hellip" to "\u2026", "lsquo" to "\u2018", "rsquo" to "\u2019",
+        "ldquo" to "\u201C", "rdquo" to "\u201D", "sbquo" to "\u201A",
+        "bdquo" to "\u201E", "dagger" to "\u2020", "Dagger" to "\u2021",
+        "bull" to "\u2022", "prime" to "\u2032", "Prime" to "\u2033",
+        "trade" to "\u2122", "copy" to "\u00A9", "reg" to "\u00AE",
+        "deg" to "\u00B0", "plusmn" to "\u00B1", "frac12" to "\u00BD",
+        "frac14" to "\u00BC", "frac34" to "\u00BE", "times" to "\u00D7",
+        "divide" to "\u00F7", "laquo" to "\u00AB", "raquo" to "\u00BB",
+        "euro" to "\u20AC", "pound" to "\u00A3", "yen" to "\u00A5",
+        "cent" to "\u00A2", "sect" to "\u00A7", "para" to "\u00B6",
+        "middot" to "\u00B7", "ensp" to "\u2002", "emsp" to "\u2003",
+        "thinsp" to "\u2009", "zwnj" to "\u200C", "zwj" to "\u200D",
+        "shy" to "\u00AD", "acute" to "\u00B4", "micro" to "\u00B5",
+        "aacute" to "\u00E1", "eacute" to "\u00E9", "iacute" to "\u00ED",
+        "oacute" to "\u00F3", "uacute" to "\u00FA", "agrave" to "\u00E0",
+        "egrave" to "\u00E8", "igrave" to "\u00EC", "ograve" to "\u00F2",
+        "ugrave" to "\u00F9", "ccedil" to "\u00E7", "ntilde" to "\u00F1",
+        "uuml" to "\u00FC", "ouml" to "\u00F6", "auml" to "\u00E4",
+        "szlig" to "\u00DF", "aring" to "\u00E5", "oslash" to "\u00F8",
+        "aelig" to "\u00E6"
+    )
+
+    private fun substituteHtmlEntities(bytes: ByteArray): ByteArray {
+        var text = String(bytes, Charsets.UTF_8)
+        if (text.startsWith("\uFEFF")) text = text.substring(1)
+        if (!text.contains('&')) return bytes
+        val pattern = Regex("&([A-Za-z][A-Za-z0-9]{1,31});")
+        val replaced = pattern.replace(text) { match ->
+            val name = match.groupValues[1]
+            when (name) {
+                "amp", "lt", "gt", "quot", "apos" -> match.value
+                else -> HTML_ENTITIES[name] ?: match.value
+            }
+        }
+        return replaced.toByteArray(Charsets.UTF_8)
+    }
 
     /** Resolves an href against the OPF folder and normalises ./ and ../ segments. */
     private fun resolve(dir: String, href: String): String {
