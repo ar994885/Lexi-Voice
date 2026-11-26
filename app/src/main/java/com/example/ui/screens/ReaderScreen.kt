@@ -121,6 +121,7 @@ import com.example.ui.components.ReaderAppearanceBottomBar
 import com.example.ui.components.ReaderAudioPlayerDockedBar
 import com.example.ui.components.ReaderTypographySheet
 import com.example.ui.components.ReaderControlSheet
+import com.example.ui.components.ReaderEpubCheckPromptDialog
 import com.example.ui.components.ReaderMetadataDraft
 import com.example.ui.components.ReaderMetadataDialog
 import com.example.ui.components.ReaderMiscSheet
@@ -198,6 +199,11 @@ fun ReaderScreen(
     var pickedCoverBytes by remember { mutableStateOf<ByteArray?>(null) }
     var pickedCoverMime by remember { mutableStateOf<String?>(null) }
     var validationReport by remember { mutableStateOf<com.example.export.EpubValidationReport?>(null) }
+    // EPUBCheck is optional: 21 MB, downloaded only if the reader asks for it.
+    var epubCheckPrompt by remember { mutableStateOf(false) }
+    var epubCheckBusy by remember { mutableStateOf(false) }
+    var epubCheckProgress by remember { mutableStateOf("") }
+    var pendingValidationUri by remember { mutableStateOf<Uri?>(null) }
     var showCustomCssDialog by remember { mutableStateOf(false) }
     var showCustomThemeDialog by remember { mutableStateOf(false) }
     val fontPickerLauncher = rememberLauncherForActivityResult(
@@ -233,7 +239,16 @@ fun ReaderScreen(
                 scope.launch {
                     if (result.success) {
                         // Check what we just wrote, not what we started from.
-                        validationReport = com.example.export.EpubValidator.validate(context, uri)
+                        // The real EPUBCheck is offered as an optional download;
+                        // without it the built-in structural checker runs instead.
+                        pendingValidationUri = uri
+                        if (com.example.export.EpubCheckRunner.isAvailable(context)) {
+                            val real = com.example.export.EpubCheckRunner.validate(context, uri)
+                            validationReport = real?.asReport()
+                                ?: com.example.export.EpubValidator.validate(context, uri)
+                        } else {
+                            epubCheckPrompt = true
+                        }
                         val snackResult = snackbarHostState.showSnackbar(
                             message = "Saved edited EPUB (${result.processedChapters} chapter(s) updated)",
                             actionLabel = "Import Copy to Library",
@@ -1271,6 +1286,59 @@ fun ReaderScreen(
                 )
                 val baseName = draft.title.trim().ifBlank { currentBook.title }
                 exportEditedEpubLauncher.launch("$baseName (Edited).epub")
+            }
+        )
+    }
+
+    if (epubCheckPrompt) {
+        ReaderEpubCheckPromptDialog(
+            sizeLabel = com.example.export.EpubCheckRunner.downloadSizeLabel(),
+            busy = epubCheckBusy,
+            progressText = epubCheckProgress,
+            onDownloadAndCheck = {
+                val uri = pendingValidationUri
+                if (uri == null) {
+                    epubCheckPrompt = false
+                } else {
+                    epubCheckBusy = true
+                    epubCheckProgress = "Starting download…"
+                    scope.launch {
+                        val installed = com.example.export.EpubCheckRunner.download(context) { fraction ->
+                            scope.launch {
+                                epubCheckProgress = if (fraction >= 1f) {
+                                    "Installed. Validating…"
+                                } else {
+                                    "Downloading EPUBCheck… " + (fraction * 100).toInt() + "%"
+                                }
+                            }
+                        }
+                        epubCheckBusy = false
+                        epubCheckPrompt = false
+                        epubCheckProgress = ""
+                        validationReport = if (installed) {
+                            com.example.export.EpubCheckRunner.validate(context, uri)?.asReport()
+                                ?: com.example.export.EpubValidator.validate(context, uri)
+                        } else {
+                            // The download is optional; a failure must not block the export.
+                            com.example.export.EpubValidator.validate(context, uri)
+                        }
+                        pendingValidationUri = null
+                    }
+                }
+            },
+            onUseBuiltIn = {
+                val uri = pendingValidationUri
+                epubCheckPrompt = false
+                if (uri != null) {
+                    scope.launch {
+                        validationReport = com.example.export.EpubValidator.validate(context, uri)
+                        pendingValidationUri = null
+                    }
+                }
+            },
+            onSkip = {
+                epubCheckPrompt = false
+                pendingValidationUri = null
             }
         )
     }
