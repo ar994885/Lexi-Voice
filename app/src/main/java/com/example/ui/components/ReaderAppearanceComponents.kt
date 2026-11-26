@@ -1029,18 +1029,12 @@ fun TextSelectionActionBar(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                        modifier = Modifier.padding(6.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.PlayArrow,
                             contentDescription = "Read from here",
                             modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(Modifier.width(2.dp))
-                        Text(
-                            text = "Read",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1
                         )
                     }
                 }
