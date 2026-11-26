@@ -96,6 +96,9 @@ enum class ChapterPullDirection {
 data class TextSelectionRectInfo(
     val text: String = "",
     val sentenceIndex: Int = -1,
+    /** Character offsets of the selection inside its sentence span; -1 when unknown. */
+    val startOffset: Int = -1,
+    val endOffset: Int = -1,
     val topCssPx: Float = 0f,
     val bottomCssPx: Float = 0f,
     val leftCssPx: Float = 0f,
@@ -382,7 +385,8 @@ private class LexiWebJsBridge(
     private val onPageBoundaryReachedCallback: (Int) -> Unit,
     private val onCenterTappedCallback: () -> Unit,
     private val onExternalLinkClickedCallback: (String) -> Unit,
-    private val onInternalLinkClickedCallback: (String) -> Unit
+    private val onInternalLinkClickedCallback: (String) -> Unit,
+    private val onHighlightTappedCallback: (Long) -> Unit
 ) {
     @JavascriptInterface
     fun onSentenceTapped(idx: Int) {
@@ -425,6 +429,8 @@ private class LexiWebJsBridge(
                 TextSelectionRectInfo(
                     text = txt,
                     sentenceIndex = obj.optInt("sentenceIndex", -1),
+                    startOffset = obj.optInt("startOffset", -1),
+                    endOffset = obj.optInt("endOffset", -1),
                     topCssPx = obj.optDouble("top", 0.0).toFloat(),
                     bottomCssPx = obj.optDouble("bottom", 0.0).toFloat(),
                     leftCssPx = obj.optDouble("left", 0.0).toFloat(),
@@ -440,6 +446,12 @@ private class LexiWebJsBridge(
     fun onTextSelectionCleared() {
         if (!isAliveProvider()) return
         onTextSelectedCallback(TextSelectionRectInfo())
+    }
+    @JavascriptInterface
+    fun onHighlightTapped(id: String) {
+        if (!isAliveProvider()) return
+        val parsed = id.trim().toLongOrNull() ?: return
+        onHighlightTappedCallback(parsed)
     }
     @JavascriptInterface
     fun onPageStateChanged(currentPage: Int, totalPages: Int) {
@@ -499,6 +511,7 @@ fun EpubWebView(
     onCenterTapped: () -> Unit = {},
     onExternalLinkClicked: (String) -> Unit = {},
     onInternalLinkClicked: (String) -> Unit = {},
+    onHighlightTapped: (Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -528,6 +541,7 @@ fun EpubWebView(
     val latestOnCenterTapped by rememberUpdatedState(onCenterTapped)
     val latestOnExternalLink by rememberUpdatedState(onExternalLinkClicked)
     val latestOnInternalLink by rememberUpdatedState(onInternalLinkClicked)
+    val latestOnHighlightTapped by rememberUpdatedState(onHighlightTapped)
     val latestSettings by rememberUpdatedState(readerSettings)
     val latestForceScroll by rememberUpdatedState(forceScrollMode)
     val latestActiveSentence by rememberUpdatedState(activeSentenceIndex)
@@ -800,6 +814,9 @@ post { if (!this@apply.isDestroyedOrDead) latestOnCenterTapped() }
 },
 onExternalLinkClickedCallback = { url ->
 post { if (!this@apply.isDestroyedOrDead) latestOnExternalLink(url) }
+},
+onHighlightTappedCallback = { id ->
+post { if (!this@apply.isDestroyedOrDead) latestOnHighlightTapped(id) }
 },
 onInternalLinkClickedCallback = { url ->
 post { if (!this@apply.isDestroyedOrDead) latestOnInternalLink(url) }
@@ -1104,7 +1121,12 @@ internal fun buildHighlightsInjectionScript(highlights: List<BookmarkEntity>): S
     highlights.filter { it.type == "HIGHLIGHT" }.forEach { hl ->
         arr.put(
             JSONObject().apply {
+                put("id", hl.id)
                 put("sentenceIndex", hl.sentenceIndex)
+                put("startOffset", hl.startOffset)
+                put("endOffset", hl.endOffset)
+                put("word", hl.selectedText)
+                put("highlightAll", hl.highlightAll)
                 put("colorHex", hl.colorHex)
             }
         )
