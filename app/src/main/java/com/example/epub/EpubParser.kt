@@ -326,20 +326,44 @@ object EpubParser {
                 cursor = chunkEnd
 
                 if (isSentence) {
-                    val sIdx = globalSentenceIdx++
                     val cleanText = chunk.replace(Regex("\\s+"), " ").trim()
-                    val startPos = offsetInPara
-                    offsetInPara += cleanText.length + 1
-                    val sentenceObj = ReaderSentence(
-                        globalIndex = sIdx,
-                        paragraphIndex = paraIdx,
-                        startInParagraph = startPos,
-                        endInParagraph = startPos + cleanText.length,
-                        text = cleanText
-                    )
-                    sentences.add(sentenceObj)
-                    blockSentences.add(sentenceObj)
-                    sentenceRanges.add(SentenceRange(sIdx, chunkStart, chunkEnd))
+                    val previousRange = sentenceRanges.lastOrNull()
+                    val previousSentence = blockSentences.lastOrNull()
+
+                    // A closing bracket that the splitter cut off on its own -- the
+                    // "]" after "[ Note 1: ... ]" -- belongs to the sentence before
+                    // it. Left alone it becomes its own chunk, which TTS reads as a
+                    // stray vowel and which made "previous sentence" look stuck.
+                    if (previousRange != null && previousSentence != null &&
+                        cleanText.isNotEmpty() && isOrphanClosingFragment(cleanText)
+                    ) {
+                        val mergedText = (previousSentence.text + " " + cleanText).trim()
+                        val merged = previousSentence.copy(
+                            endInParagraph = previousSentence.startInParagraph + mergedText.length,
+                            text = mergedText
+                        )
+                        // Replace rather than append: the orphan must not consume a
+                        // sentence index, or TTS and the highlight anchors drift apart.
+                        blockSentences[blockSentences.size - 1] = merged
+                        sentences[sentences.size - 1] = merged
+                        sentenceRanges[sentenceRanges.size - 1] =
+                            SentenceRange(previousRange.sentIdx, previousRange.start, chunkEnd)
+                        offsetInPara = merged.endInParagraph + 1
+                    } else {
+                        val sIdx = globalSentenceIdx++
+                        val startPos = offsetInPara
+                        offsetInPara += cleanText.length + 1
+                        val sentenceObj = ReaderSentence(
+                            globalIndex = sIdx,
+                            paragraphIndex = paraIdx,
+                            startInParagraph = startPos,
+                            endInParagraph = startPos + cleanText.length,
+                            text = cleanText
+                        )
+                        sentences.add(sentenceObj)
+                        blockSentences.add(sentenceObj)
+                        sentenceRanges.add(SentenceRange(sIdx, chunkStart, chunkEnd))
+                    }
                 }
             }
 
@@ -1094,6 +1118,44 @@ document.addEventListener('selectionchange', function() {
         return out
     }
 
+    /**
+     * Characters that only ever close something. A fragment made entirely of these
+     * is the tail of the sentence before it, never a sentence of its own.
+     *
+     * ASCII quote marks are deliberately absent: they open as often as they close,
+     * so merging them backwards would attach an opening quote to the wrong sentence.
+     */
+    private val ORPHAN_CLOSERS: Set<Char> = "]]］】》〉」』）)｝}〕〗〙〛”’".toSet()
+
+    internal fun isOrphanClosingFragment(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return false
+        return trimmed.all { it in ORPHAN_CLOSERS }
+    }
+
+    /**
+     * Folds sentences that are nothing but a closing bracket into the sentence
+     * before them. Used by the BreakIterator path; the block splitter does the same
+     * inline so that its character ranges stay correct.
+     */
+    internal fun mergeOrphanClosers(sentences: List<ReaderSentence>): List<ReaderSentence> {
+        if (sentences.size < 2) return sentences
+        val merged = mutableListOf<ReaderSentence>()
+        for (sentence in sentences) {
+            val previous = merged.lastOrNull()
+            if (previous != null && isOrphanClosingFragment(sentence.text)) {
+                val text = (previous.text + " " + sentence.text).trim()
+                merged[merged.size - 1] = previous.copy(
+                    endInParagraph = previous.startInParagraph + text.length,
+                    text = text
+                )
+            } else {
+                merged.add(sentence)
+            }
+        }
+        return merged
+    }
+
     fun splitIntoSentences(
         paragraph: String,
         paragraphIndex: Int,
@@ -1138,7 +1200,7 @@ document.addEventListener('selectionchange', function() {
                 )
             )
         }
-        return result
+        return mergeOrphanClosers(result)
     }
 
     fun openReadableZip(context: Context, fileKey: String, isDirectPath: Boolean): Pair<ZipFile, File?>? {
