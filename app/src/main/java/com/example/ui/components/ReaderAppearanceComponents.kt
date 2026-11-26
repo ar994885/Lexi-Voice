@@ -1018,24 +1018,21 @@ fun TextSelectionActionBar(
                     Text("Note", style = MaterialTheme.typography.labelMedium, maxLines = 1)
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable { onReadAloudFromHere() }
-                        .testTag("selection_read_aloud_button")
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PlayArrow,
-                            contentDescription = "Read from here",
-                            modifier = Modifier.size(15.dp)
-                        )
+                Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .clickable { onReadAloudFromHere() }
+            .padding(horizontal = 6.dp, vertical = 5.dp) // Total width = 27.dp (~2 letters wide)
+            .testTag("selection_read_aloud_button")
+    ) {
+        Icon(
+            imageVector = Icons.Default.PlayArrow,
+            contentDescription = "Read from here",
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.size(15.dp)
+        )
                     }
                 }
             }
