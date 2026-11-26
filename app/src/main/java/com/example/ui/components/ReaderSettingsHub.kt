@@ -419,6 +419,11 @@ fun ReaderValidationDialog(
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(report.summary(), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "Checked with " + report.engine,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 report.errors.take(25).forEach { issue ->
                     Text(
                         text = "• " + issue.message,
@@ -447,6 +452,71 @@ fun ReaderValidationDialog(
                 onClick = onDismiss,
                 modifier = Modifier.testTag("reader_validation_ok")
             ) { Text("OK") }
+        }
+    )
+}
+
+/**
+ * The EPUBCheck opt-in. The official engine is 21 MB, so it is never shipped in
+ * the APK: the reader is offered it once, and the built-in structural checker
+ * remains the default for anyone who declines.
+ */
+@Composable
+fun ReaderEpubCheckPromptDialog(
+    sizeLabel: String,
+    busy: Boolean,
+    progressText: String,
+    onDownloadAndCheck: () -> Unit,
+    onUseBuiltIn: () -> Unit,
+    onSkip: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!busy) onSkip() },
+        icon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+        title = { Text("Validate with EPUBCheck?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "EPUBCheck is the official W3C validator. It is downloaded once (" +
+                        sizeLabel + ") and kept on this device, then reused for every export.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text(
+                    text = "Optional. The built-in checker is instant and covers the structural " +
+                        "basics — a broken manifest, a bad spine, malformed XHTML — but it is not " +
+                        "a conformance check.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (busy || progressText.isNotBlank()) {
+                    HorizontalDivider()
+                    Text(
+                        text = progressText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (!busy) {
+                    TextButton(
+                        onClick = onUseBuiltIn,
+                        modifier = Modifier.testTag("epubcheck_use_builtin")
+                    ) { Text("Use the built-in checker instead") }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDownloadAndCheck,
+                enabled = !busy,
+                modifier = Modifier.testTag("epubcheck_download")
+            ) { Text(if (busy) "Downloading…" else "Download & check") }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onSkip,
+                enabled = !busy,
+                modifier = Modifier.testTag("epubcheck_skip")
+            ) { Text("Skip") }
         }
     )
 }
