@@ -66,6 +66,11 @@ object UpdateChecker {
                         "Release ${tag.ifBlank { "latest" }} has no APK attached"
                     )
                 }
+                if (!isOwnReleaseAsset(apkUrl)) {
+                    throw IllegalStateException(
+                        "Release asset points outside this repository: $apkUrl"
+                    )
+                }
                 val publishedAt = maxOf(
                     parseGithubDate(root.optString("published_at")),
                     assetUpdatedAt
@@ -79,6 +84,28 @@ object UpdateChecker {
             } finally {
                 conn.disconnect()
             }
+        }
+    }
+
+    /**
+     * Only this repository's own release assets are installable.
+     *
+     * The API response is trusted input, but a compromised or mistaken release can
+     * name any URL as its APK. Android would still refuse an APK signed with a
+     * different key, so this is defence in depth rather than the only barrier: it
+     * keeps the download pointed at github.com and at this repository's release
+     * path, so a redirected asset cannot be substituted for something else.
+     */
+    private fun isOwnReleaseAsset(url: String): Boolean {
+        val parsed = runCatching { URL(url) }.getOrNull() ?: return false
+        val host = parsed.host.lowercase()
+        val path = parsed.path.orEmpty()
+        return when (host) {
+            "github.com" -> path.startsWith("/$OWNER/$REPO/releases/download/", ignoreCase = true)
+            // GitHub redirects release downloads here; the connection follows the
+            // redirect, so the initial host is what can be checked.
+            "objects.githubusercontent.com" -> true
+            else -> false
         }
     }
 
@@ -140,6 +167,10 @@ object UpdateChecker {
         info: UpdateInfo,
         onProgress: (Int) -> Unit = {}
     ): File = withContext(Dispatchers.IO) {
+        // Checked again here: Info can outlive the check that produced it.
+        if (!isOwnReleaseAsset(info.apkUrl)) {
+            throw IllegalStateException("Refusing to download from ${info.apkUrl}")
+        }
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         val target = File(dir, "lexivoice-${info.versionName}.apk")
         if (target.exists()) target.delete()
