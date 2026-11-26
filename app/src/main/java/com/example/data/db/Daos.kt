@@ -257,6 +257,12 @@ interface BookmarkDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBookmark(bookmark: BookmarkEntity): Long
 
+    @Query("UPDATE bookmarks SET note = :note, noteImage = :noteImage, highlightAll = :highlightAll WHERE id = :id")
+    suspend fun updateBookmarkNote(id: Long, note: String, noteImage: String, highlightAll: Boolean)
+
+    @Query("SELECT * FROM bookmarks WHERE id = :id LIMIT 1")
+    suspend fun getBookmarkById(id: Long): BookmarkEntity?
+
     @Query("DELETE FROM bookmarks WHERE id = :id")
     suspend fun deleteBookmark(id: Long)
 

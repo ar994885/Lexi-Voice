@@ -104,7 +104,14 @@ data class BookmarkEntity(
     val note: String = "",
     val colorHex: String = "#FFEB3B",
     val type: String = "HIGHLIGHT", // HIGHLIGHT or BOOKMARK
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Character offsets inside the sentence span; 0,0 means "the whole sentence". */
+    val startOffset: Int = 0,
+    val endOffset: Int = 0,
+    /** Base64 JPEG, downscaled, or empty. Kept small enough for the backup JSON. */
+    val noteImage: String = "",
+    /** Highlight every occurrence of the selected word in this book, not just this one. */
+    val highlightAll: Boolean = false
 )
 
 @Entity(tableName = "shelves")

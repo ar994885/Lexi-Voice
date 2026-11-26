@@ -27,7 +27,7 @@ class LexiTypeConverters {
         BookmarkEntity::class,
         ShelfEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 @TypeConverters(LexiTypeConverters::class)
@@ -151,6 +151,15 @@ abstract class LexiDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `bookmarks` ADD COLUMN `startOffset` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `bookmarks` ADD COLUMN `endOffset` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `bookmarks` ADD COLUMN `noteImage` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `bookmarks` ADD COLUMN `highlightAll` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): LexiDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -158,7 +167,7 @@ abstract class LexiDatabase : RoomDatabase() {
                     LexiDatabase::class.java,
                     "lexivoice_library.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .build()
                     .also { INSTANCE = it }
             }
