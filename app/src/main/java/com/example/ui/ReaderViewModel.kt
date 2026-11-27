@@ -209,7 +209,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         termScope: String,
         sentenceIndex: Int,
         startOffset: Int,
-        endOffset: Int
+        endOffset: Int,
+        chapterKey: String = "",
+        occurrenceIndex: Int = 0
     ) {
         val book = _uiState.value.book ?: return
         viewModelScope.launch {
@@ -228,7 +230,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 termScope = termScope,
                 sentenceIndex = sentenceIndex,
                 startOffset = startOffset,
-                endOffset = endOffset
+                endOffset = endOffset,
+                chapterKey = chapterKey,
+                occurrenceIndex = occurrenceIndex
             )
             app.backupSyncRepository.scheduleAutoMirror()
         }
