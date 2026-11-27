@@ -283,8 +283,12 @@ object EpubExporter {
         }
 
         val bodyNode = doc.selectFirst("body") ?: doc
-        // Anchored terms are applied one at a time, by occurrence, so a "this word"
-        // edit cannot leak into the other places that word appears.
+        // Precedence, fixed by order of application rather than by creation time:
+        // anchored ("this word") terms claim their spot against the raw text first,
+        // then whole-book terms fill in everywhere the anchor did not already
+        // replace something. That is what makes a "this word" edit win even when the
+        // whole-book rule was created after it.
+        applyAnchoredTerms(bodyNode, visualRules, entryName)
         val textWideRules = visualRules.filterNot { it.kind == "TERM" && it.termScope == "WORD" }
         PronunciationProcessor.applyReaderRulesToTextNodes(
             root = bodyNode,
@@ -292,7 +296,6 @@ object EpubExporter {
             bookId = bookId,
             skipTags = setOf("script", "style", "svg", "noscript", "rt", "rp")
         )
-        applyAnchoredTerms(bodyNode, visualRules, entryName)
         val titleEl = doc.selectFirst("head > title, title")
         if (titleEl != null) {
             PronunciationProcessor.applyReaderRulesToTextNodes(
