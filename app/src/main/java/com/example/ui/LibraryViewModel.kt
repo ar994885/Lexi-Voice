@@ -243,6 +243,16 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    /**
+     * Runs [onResult] with the folder copy already in the library, if there is one,
+     * so the screen can ask before creating a second entry for the same file.
+     */
+    fun findImportDuplicate(uri: Uri, onResult: (com.example.data.db.BookEntity?) -> Unit) {
+        viewModelScope.launch {
+            onResult(libraryRepo.findFolderDuplicateForImport(uri))
+        }
+    }
+
     fun importSingleEpub(uri: Uri, onImported: (Long) -> Unit) {
         runCatching {
             app.contentResolver.takePersistableUriPermission(
