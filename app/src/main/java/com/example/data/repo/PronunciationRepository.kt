@@ -17,7 +17,10 @@ class PronunciationRepository(
         dao.getEnabledRulesForPlayback(bookId)
 
     suspend fun getEnabledRulesForReaderDisplay(bookId: Long?): List<PronunciationRuleEntity> =
+        // A WORD-scoped term is anchored to one occurrence, so it must not go through
+        // the text-wide replacer: the reader applies those itself, by range.
         dao.getEnabledRulesForReaderDisplay(bookId)
+            .filterNot { it.kind == "TERM" && it.termScope == "WORD" }
 
     fun observeTermRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>> =
         dao.observeTermRulesForBook(bookId)

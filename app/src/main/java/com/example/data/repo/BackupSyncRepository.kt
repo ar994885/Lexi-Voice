@@ -66,6 +66,11 @@ class BackupSyncRepository(
                         put("isEnabled", rule.isEnabled)
                         put("applyToAudio", rule.applyToAudio)
                         put("applyToReaderText", rule.applyToReaderText)
+                        put("kind", rule.kind)
+                        put("termScope", rule.termScope)
+                        put("sentenceIndex", rule.sentenceIndex)
+                        put("startOffset", rule.startOffset)
+                        put("endOffset", rule.endOffset)
                     }
                 )
             }
@@ -198,6 +203,11 @@ class BackupSyncRepository(
             val isEnabled = obj.optBoolean("isEnabled", true)
             val applyToAudio = obj.optBoolean("applyToAudio", true)
             val applyToReaderText = obj.optBoolean("applyToReaderText", false)
+            val kind = obj.optString("kind", "TTS")
+            val termScope = obj.optString("termScope", "BOOK")
+            val sentenceIndex = obj.optInt("sentenceIndex", 0)
+            val startOffset = obj.optInt("startOffset", 0)
+            val endOffset = obj.optInt("endOffset", 0)
 
             val isDup = existingRules.any { existing ->
                 existing.findText == findText &&
@@ -222,7 +232,12 @@ class BackupSyncRepository(
                 wholeWordOnly = wholeWordOnly,
                 isEnabled = isEnabled,
                 applyToAudio = applyToAudio,
-                applyToReaderText = applyToReaderText
+                applyToReaderText = applyToReaderText,
+                kind = kind,
+                termScope = termScope,
+                sentenceIndex = sentenceIndex,
+                startOffset = startOffset,
+                endOffset = endOffset
             )
             val insertedId = database.pronunciationRuleDao().insertRule(newRule)
             existingRules.add(newRule.copy(id = insertedId))
