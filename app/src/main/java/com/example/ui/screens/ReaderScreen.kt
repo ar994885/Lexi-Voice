@@ -195,6 +195,7 @@ fun ReaderScreen(
     var showBookmarksSheet by remember { mutableStateOf(false) }
     var showHighlightsSheet by remember { mutableStateOf(false) }
     var showEditedTermsSheet by remember { mutableStateOf(false) }
+    var termPrefill by remember { mutableStateOf("") }
     val editedTerms by viewModel.editedTerms.collectAsStateWithLifecycle()
     // Chapter-pull gesture feedback: direction, tension, and the brief commit spin.
     var pullDirection by remember { mutableIntStateOf(0) }
@@ -760,6 +761,12 @@ fun ReaderScreen(
                             selectedText = selectedWordForRule,
                             canReadFromHere = selectedSentenceForAction >= 0,
                             onAddNote = { noteDraftOpen = true },
+                            // "Edit" is a text edit, not a pronunciation rule: it opens
+                            // the Edited Terms editor with this selection anchored.
+                            onEditSelectedText = {
+                                termPrefill = selectedWordForRule
+                                showEditedTermsSheet = true
+                            },
                             onHighlightColor = { hex ->
                                 viewModel.saveHighlight(
                                     sentenceIndex = selectedSentenceForAction.coerceAtLeast(0),
@@ -1255,11 +1262,25 @@ fun ReaderScreen(
     if (showEditedTermsSheet) {
         com.example.ui.components.ReaderEditedTermsSheet(
             terms = editedTerms,
+            prefillText = termPrefill,
             onSave = { id, original, replacement, scope, sentence, start, end ->
-                viewModel.saveEditedTerm(id, original, replacement, scope, sentence, start, end)
+                viewModel.saveEditedTerm(
+                    id = id,
+                    original = original,
+                    replacement = replacement,
+                    termScope = scope,
+                    sentenceIndex = sentence,
+                    startOffset = start,
+                    endOffset = end,
+                    chapterKey = uiState.chapters.getOrNull(uiState.currentChapterIndex)?.href.orEmpty(),
+                    occurrenceIndex = selectionRectInfo.occurrenceIndex
+                )
             },
             onDelete = { id -> viewModel.deleteEditedTerm(id) },
-            onDismiss = { showEditedTermsSheet = false }
+            onDismiss = {
+                showEditedTermsSheet = false
+                termPrefill = ""
+            }
         )
     }
 
