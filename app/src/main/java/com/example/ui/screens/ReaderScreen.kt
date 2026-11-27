@@ -126,6 +126,9 @@ import com.example.ui.components.ReaderEpubCheckPromptDialog
 import com.example.ui.components.ReaderMetadataDraft
 import com.example.ui.components.ReaderMetadataDialog
 import com.example.ui.components.ReaderMiscSheet
+import com.example.ui.components.ReaderPullRing
+import com.example.ui.components.ChapterPullDirection
+import androidx.compose.runtime.mutableFloatStateOf
 import com.example.ui.components.ReaderSettingsHubSheet
 import com.example.ui.components.ReaderSettingsPanel
 import com.example.ui.components.TextSelectionActionBar
@@ -190,6 +193,10 @@ fun ReaderScreen(
     var showSearchSheet by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
     var showHighlightsSheet by remember { mutableStateOf(false) }
+    // Chapter-pull gesture feedback: direction, tension, and the brief commit spin.
+    var pullDirection by remember { mutableIntStateOf(0) }
+    var pullProgress by remember { mutableFloatStateOf(0f) }
+    var pullCommitting by remember { mutableStateOf(false) }
     var showAppearanceSheet by remember { mutableStateOf(false) }
     var showReaderSettingsHub by remember { mutableStateOf(false) }
     var showReaderControlSheet by remember { mutableStateOf(false) }
@@ -392,6 +399,13 @@ fun ReaderScreen(
         }
         onDispose {
             onRegisterVolumeKeyHandler(null)
+        }
+    }
+
+    LaunchedEffect(pullCommitting) {
+        if (pullCommitting) {
+            kotlinx.coroutines.delay(280)
+            pullCommitting = false
         }
     }
 
@@ -653,7 +667,27 @@ fun ReaderScreen(
                                     targetAnchorTrigger = anchor to System.nanoTime()
                                 }
                             },
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            onPullProgress = { dir, progress ->
+                                pullDirection = when (dir) {
+                                    ChapterPullDirection.NEXT -> 1
+                                    ChapterPullDirection.PREV -> -1
+                                    ChapterPullDirection.NONE -> 0
+                                }
+                                pullProgress = progress
+                                if (progress >= 1f) pullCommitting = true
+                            }
+                        )
+                        ReaderPullRing(
+                            direction = pullDirection,
+                            progress = pullProgress,
+                            committing = pullCommitting,
+                            hasTarget = if (pullDirection >= 0) {
+                                uiState.currentChapterIndex < uiState.chapters.lastIndex
+                            } else {
+                                uiState.currentChapterIndex > 0
+                            },
+                            accent = MaterialTheme.colorScheme.primary
                         )
                     }
                 }
