@@ -1263,12 +1263,13 @@ fun ReaderScreen(
         com.example.ui.components.ReaderEditedTermsSheet(
             terms = editedTerms,
             prefillText = termPrefill,
-            onSave = { id, original, replacement, scope, sentence, start, end ->
+            onSave = { id, original, replacement, scope, matchCase, sentence, start, end ->
                 viewModel.saveEditedTerm(
                     id = id,
                     original = original,
                     replacement = replacement,
                     termScope = scope,
+                    matchCase = matchCase,
                     sentenceIndex = sentence,
                     startOffset = start,
                     endOffset = end,

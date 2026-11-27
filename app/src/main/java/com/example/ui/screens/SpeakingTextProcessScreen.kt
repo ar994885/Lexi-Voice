@@ -712,26 +712,6 @@ fun PronunciationRuleEditorDialog(
                         modifier = Modifier.testTag("pronunciation_apply_audio_switch")
                     )
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("Reader Display & Edited EPUB", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            "Replaces visible words in Reader & EPUB export",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = applyToReaderText,
-                        onCheckedChange = { applyToReaderText = it },
-                        modifier = Modifier.testTag("pronunciation_apply_reader_switch")
-                    )
-                }
-
                 HorizontalDivider()
 
                 Text("Rule Scope", style = MaterialTheme.typography.labelLarge)
