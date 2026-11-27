@@ -673,6 +673,7 @@ fun ReaderScreen(
                                 }
                             },
                             modifier = Modifier.fillMaxSize(),
+                            anchoredTerms = editedTerms,
                             onPullProgress = { dir, progress ->
                                 pullDirection = when (dir) {
                                     ChapterPullDirection.NEXT -> 1
