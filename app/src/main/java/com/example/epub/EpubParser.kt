@@ -137,13 +137,19 @@ object EpubParser {
         return try {
             ZipFile(localZipFile).use { zip ->
                 val opfPath = findOpfPath(zip)
-                    ?: return EpubBookStructure(fallbackTitle, "Unknown Author", "", null, emptyList())
-                val opfEntry = getZipEntryIgnoreCase(zip, opfPath)
-                    ?: return EpubBookStructure(fallbackTitle, "Unknown Author", "", null, emptyList())
+                val opfEntry = opfPath?.let { getZipEntryIgnoreCase(zip, it) }
+                if (opfPath == null || opfEntry == null) {
+                    // No container.xml or no package document: read the archive as a
+                    // flat list of documents rather than refusing the book.
+                    return EpubBookStructure(
+                        fallbackTitle, "Unknown Author", "", null, fallbackChaptersFromZip(zip)
+                    )
+                }
                 val opf = zip.getInputStream(opfEntry).use { parseOpf(it, opfPath) }
 
                 val tocMap = buildTocTitleMap(zip, opf)
-                val chapters = opf.spineEntries.mapIndexed { idx, (_, path) ->
+                val spineEntries = opf.spineEntries.ifEmpty { fallbackSpineFromZip(zip) }
+                val chapters = spineEntries.mapIndexed { idx, (_, path) ->
                     val normalized = normalizePath(path)
                     val title = tocMap[normalized]
                         ?: extractTitleFromHtmlQuick(zip, path)
@@ -1331,6 +1337,20 @@ document.addEventListener('selectionchange', function() {
         val spineEntries = spineIds.mapNotNull { id ->
             val item = manifest[id] ?: return@mapNotNull null
             id to resolvePath(opfDir, item.href)
+        }.ifEmpty {
+            // Malformed book: a spine that is missing, empty, or whose idrefs do not
+            // resolve to manifest items. The manifest usually survives even when the
+            // spine does not, so fall back to every XHTML document in manifest order.
+            // Without this the reader refused the whole file.
+            manifest.values
+                .filter { item ->
+                    val type = item.mediaType.lowercase()
+                    val href = item.href.lowercase()
+                    (type.contains("xhtml") || type.contains("html") || href.endsWith(".xhtml") ||
+                        href.endsWith(".html") || href.endsWith(".htm")) &&
+                        !href.endsWith(".ncx")
+                }
+                .map { item -> item.id to resolvePath(opfDir, item.href) }
         }
 
         return OpfInfo(
@@ -1344,6 +1364,39 @@ document.addEventListener('selectionchange', function() {
             spineEntries = spineEntries
         )
     }
+
+    /**
+     * Documents in archive order, for a book whose package document cannot be read.
+     * Anything that looks like a navigational page is skipped so the reader does not
+     * open the table of contents as chapter one.
+     */
+    private fun fallbackSpineFromZip(zip: ZipFile): List<Pair<String, String>> =
+        zip.entries().asSequence()
+            .filter { entry ->
+                !entry.isDirectory && run {
+                    val name = entry.name.lowercase()
+                    (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm")) &&
+                        !name.contains("nav.") && !name.contains("toc.") && !name.contains("cover.")
+                }
+            }
+            .map { it.name }
+            .sorted()
+            .map { path -> path to path }
+            .toList()
+
+    private fun fallbackChaptersFromZip(zip: ZipFile): List<EpubChapterSummary> =
+        fallbackSpineFromZip(zip).mapIndexed { idx, (_, path) ->
+            val title = extractTitleFromHtmlQuick(zip, path) ?: "Chapter " + (idx + 1)
+            val entry = getZipEntryIgnoreCase(zip, path)
+            val approxWords = ((entry?.size ?: 0L).coerceAtLeast(0L) / 12L).toInt().coerceAtLeast(50)
+            EpubChapterSummary(
+                index = idx,
+                title = title,
+                href = path,
+                wordCount = approxWords,
+                estimatedMinutes = (approxWords / 155).coerceAtLeast(1)
+            )
+        }
 
     private fun buildTocTitleMap(zip: ZipFile, opf: OpfInfo): Map<String, String> {
         val map = linkedMapOf<String, String>()
