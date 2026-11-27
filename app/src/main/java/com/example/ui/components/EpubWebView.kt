@@ -522,6 +522,7 @@ fun EpubWebView(
     onPullNextChapter: () -> Unit,
     onEndOfBookReached: () -> Unit = {},
     onPullProgress: (ChapterPullDirection, Float) -> Unit = { _, _ -> },
+    anchoredTerms: List<com.example.data.db.PronunciationRuleEntity> = emptyList(),
     onScrollChanged: (Int) -> Unit = {},
     onTextSelectedWithSentence: (String, Int) -> Unit = { _, _ -> },
     onTextSelectedWithRect: (TextSelectionRectInfo) -> Unit = {},
@@ -558,6 +559,7 @@ fun EpubWebView(
     val latestOnSentenceTapped by rememberUpdatedState(onSentenceTapped)
     val latestOnPullPrev by rememberUpdatedState(onPullPrevChapter)
     val latestOnPullProgress by rememberUpdatedState(onPullProgress)
+    val latestAnchoredTerms by rememberUpdatedState(anchoredTerms)
     val latestOnPullNext by rememberUpdatedState(onPullNextChapter)
     val latestOnEndOfBook by rememberUpdatedState(onEndOfBookReached)
     val latestOnScroll by rememberUpdatedState(onScrollChanged)
@@ -975,6 +977,19 @@ super.onPageFinished(view, url)
 if ((view as? LexiBookWebView)?.isDestroyedOrDead == true) return
 consecutiveRendererFailures = 0
 pageLoadedKey = lastLoadedKey
+val anchoredJson = JSONArray().apply {
+    latestAnchoredTerms.filter { it.termScope == "WORD" && it.isEnabled }.forEach { term ->
+        put(
+            JSONObject().apply {
+                put("sentenceIndex", term.sentenceIndex)
+                put("startOffset", term.startOffset)
+                put("endOffset", term.endOffset)
+                put("findText", term.findText)
+                put("replaceWith", term.replaceWith)
+            }
+        )
+    }
+}
 val settingsNow = latestSettings
 val isPagedNow = !latestForceScroll && settingsNow.readingMode == ReaderMode.PAGED
 view?.evaluateJavascript(buildFontFaceInjectionScript(settingsNow.customFontName), null)
@@ -996,6 +1011,7 @@ window.lexiRecalcPagination($initPage);
 }
 $anchorJs
 ${if (initPage < 0) "setTimeout(function(){ if (window.lexiScrollToEnd) window.lexiScrollToEnd(); }, 60);" else ""}
+setTimeout(function(){ if (window.lexiApplyAnchoredTerms) window.lexiApplyAnchoredTerms($anchoredJson); }, 50);
 ${if (activeIdx >= 0) "setTimeout(function(){ window.lexiHighlightSentence && window.lexiHighlightSentence($activeIdx, true); }, 60);" else ""}
 })();
 """.trimIndent(),
