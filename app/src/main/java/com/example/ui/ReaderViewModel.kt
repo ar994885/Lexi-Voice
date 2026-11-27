@@ -207,6 +207,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         original: String,
         replacement: String,
         termScope: String,
+        matchCase: Boolean = false,
         sentenceIndex: Int,
         startOffset: Int,
         endOffset: Int,
@@ -215,13 +216,23 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         val book = _uiState.value.book ?: return
         viewModelScope.launch {
+            // The selection was made on text that already has whole-book terms
+            // applied. Store the underlying text instead, so this anchor still
+            // resolves if the whole-book rule is created later.
+            val bookTerms = runCatching {
+                app.pronunciationRepository.getRulesForExport(book.id)
+            }.getOrDefault(emptyList())
+            val underlying = bookTerms.firstOrNull {
+                it.kind == "TERM" && it.termScope == "BOOK" && it.isEnabled &&
+                    it.replaceWith.equals(original.trim(), ignoreCase = true)
+            }?.findText ?: original
             app.pronunciationRepository.saveRule(
                 id = id,
-                findText = original,
+                findText = underlying,
                 replaceWith = replacement,
                 scope = com.example.data.db.PronunciationScope.BOOK,
                 bookId = book.id,
-                matchCase = false,
+                matchCase = matchCase,
                 wholeWordOnly = true,
                 isEnabled = true,
                 applyToAudio = false,
