@@ -19,6 +19,9 @@ class PronunciationRepository(
     suspend fun getEnabledRulesForReaderDisplay(bookId: Long?): List<PronunciationRuleEntity> =
         dao.getEnabledRulesForReaderDisplay(bookId)
 
+    fun observeTermRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>> =
+        dao.observeTermRulesForBook(bookId)
+
     suspend fun saveRule(
         id: Long = 0L,
         findText: String,
@@ -29,7 +32,12 @@ class PronunciationRepository(
         wholeWordOnly: Boolean,
         isEnabled: Boolean = true,
         applyToAudio: Boolean = true,
-        applyToReaderText: Boolean = false
+        applyToReaderText: Boolean = false,
+        kind: String = "TTS",
+        termScope: String = "BOOK",
+        sentenceIndex: Int = 0,
+        startOffset: Int = 0,
+        endOffset: Int = 0
     ): Long {
         val normalizedBookId = if (scope == PronunciationScope.BOOK) bookId?.takeIf { it > 0L } else null
         val entity = PronunciationRuleEntity(
@@ -42,7 +50,12 @@ class PronunciationRepository(
             wholeWordOnly = wholeWordOnly,
             isEnabled = isEnabled,
             applyToAudio = applyToAudio,
-            applyToReaderText = applyToReaderText
+            applyToReaderText = applyToReaderText,
+            kind = kind,
+            termScope = termScope,
+            sentenceIndex = sentenceIndex,
+            startOffset = startOffset,
+            endOffset = endOffset
         )
         val resultId = if (id > 0L) {
             dao.updateRule(entity)
