@@ -605,8 +605,10 @@ fun ReaderScreen(
                             onSentenceTapped = { _ -> },
                             onPullPrevChapter = {
                                 if (uiState.currentChapterIndex > 0) {
-                                    val jumpEnd = readerSettings.readingMode == ReaderMode.PAGED
-                                    viewModel.selectChapter(uiState.currentChapterIndex - 1, jumpToEnd = jumpEnd)
+                                    // Pulling back has to land at the END of the previous
+                                    // chapter. This used to depend on paged mode, which is
+                                    // retired, so it always opened at the chapter's start.
+                                    viewModel.selectChapter(uiState.currentChapterIndex - 1, jumpToEnd = true)
                                 }
                             },
                             onPullNextChapter = {
