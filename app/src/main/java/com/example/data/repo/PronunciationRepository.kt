@@ -40,7 +40,9 @@ class PronunciationRepository(
         termScope: String = "BOOK",
         sentenceIndex: Int = 0,
         startOffset: Int = 0,
-        endOffset: Int = 0
+        endOffset: Int = 0,
+        chapterKey: String = "",
+        occurrenceIndex: Int = 0
     ): Long {
         val normalizedBookId = if (scope == PronunciationScope.BOOK) bookId?.takeIf { it > 0L } else null
         val entity = PronunciationRuleEntity(
@@ -58,7 +60,9 @@ class PronunciationRepository(
             termScope = termScope,
             sentenceIndex = sentenceIndex,
             startOffset = startOffset,
-            endOffset = endOffset
+            endOffset = endOffset,
+            chapterKey = chapterKey,
+            occurrenceIndex = occurrenceIndex
         )
         val resultId = if (id > 0L) {
             dao.updateRule(entity)

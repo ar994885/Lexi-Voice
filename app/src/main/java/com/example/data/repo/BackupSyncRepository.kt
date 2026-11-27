@@ -71,6 +71,8 @@ class BackupSyncRepository(
                         put("sentenceIndex", rule.sentenceIndex)
                         put("startOffset", rule.startOffset)
                         put("endOffset", rule.endOffset)
+                        put("chapterKey", rule.chapterKey)
+                        put("occurrenceIndex", rule.occurrenceIndex)
                     }
                 )
             }
@@ -208,6 +210,8 @@ class BackupSyncRepository(
             val sentenceIndex = obj.optInt("sentenceIndex", 0)
             val startOffset = obj.optInt("startOffset", 0)
             val endOffset = obj.optInt("endOffset", 0)
+            val chapterKey = obj.optString("chapterKey", "")
+            val occurrenceIndex = obj.optInt("occurrenceIndex", 0)
 
             val isDup = existingRules.any { existing ->
                 existing.findText == findText &&
@@ -237,7 +241,9 @@ class BackupSyncRepository(
                 termScope = termScope,
                 sentenceIndex = sentenceIndex,
                 startOffset = startOffset,
-                endOffset = endOffset
+                endOffset = endOffset,
+                chapterKey = chapterKey,
+                occurrenceIndex = occurrenceIndex
             )
             val insertedId = database.pronunciationRuleDao().insertRule(newRule)
             existingRules.add(newRule.copy(id = insertedId))
