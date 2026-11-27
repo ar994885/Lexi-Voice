@@ -36,6 +36,7 @@ import com.example.data.db.PronunciationRuleEntity
 @Composable
 fun ReaderEditedTermsSheet(
     terms: List<PronunciationRuleEntity>,
+    prefillText: String = "",
     onSave: (
         id: Long,
         original: String,
@@ -49,7 +50,7 @@ fun ReaderEditedTermsSheet(
     onDismiss: () -> Unit
 ) {
     var editing by remember { mutableStateOf<PronunciationRuleEntity?>(null) }
-    var creating by remember { mutableStateOf(false) }
+    var creating by remember { mutableStateOf(prefillText.isNotBlank()) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -119,6 +120,7 @@ fun ReaderEditedTermsSheet(
     if (creating || target != null) {
         EditorDialog(
             existing = target,
+            prefillOriginal = prefillText,
             onDismiss = {
                 creating = false
                 editing = null
@@ -135,10 +137,11 @@ fun ReaderEditedTermsSheet(
 @Composable
 private fun EditorDialog(
     existing: PronunciationRuleEntity?,
+    prefillOriginal: String = "",
     onDismiss: () -> Unit,
     onConfirm: (String, String, String, Int, Int, Int) -> Unit
 ) {
-    var original by remember { mutableStateOf(existing?.findText ?: "") }
+    var original by remember { mutableStateOf(existing?.findText ?: prefillOriginal) }
     var replacement by remember { mutableStateOf(existing?.replaceWith ?: "") }
     var scope by remember { mutableStateOf(existing?.termScope ?: "BOOK") }
 

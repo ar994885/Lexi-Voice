@@ -100,6 +100,8 @@ data class TextSelectionRectInfo(
     /** Character offsets of the selection inside its sentence span; -1 when unknown. */
     val startOffset: Int = -1,
     val endOffset: Int = -1,
+    /** Occurrences of the selected text before it in this chapter, for anchoring. */
+    val occurrenceIndex: Int = 0,
     val topCssPx: Float = 0f,
     val bottomCssPx: Float = 0f,
     val leftCssPx: Float = 0f,
@@ -455,6 +457,7 @@ private class LexiWebJsBridge(
                     sentenceIndex = obj.optInt("sentenceIndex", -1),
                     startOffset = obj.optInt("startOffset", -1),
                     endOffset = obj.optInt("endOffset", -1),
+                    occurrenceIndex = obj.optInt("occurrenceIndex", 0),
                     topCssPx = obj.optDouble("top", 0.0).toFloat(),
                     bottomCssPx = obj.optDouble("bottom", 0.0).toFloat(),
                     leftCssPx = obj.optDouble("left", 0.0).toFloat(),

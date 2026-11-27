@@ -921,6 +921,8 @@ fun TextSelectionActionBar(
     onReadAloudFromHere: () -> Unit,
     onDefineSelection: () -> Unit,
     onAddPronunciationRule: () -> Unit,
+    /** When set, the Edit button opens the Edited Terms editor instead. */
+    onEditSelectedText: (() -> Unit)? = null,
     onCopySelection: () -> Unit = {},
     onSelectAll: () -> Unit = {},
     onShareSelection: () -> Unit = {},
@@ -1021,7 +1023,7 @@ fun TextSelectionActionBar(
                 }
 
                 TextButton(
-                    onClick = onAddPronunciationRule,
+                    onClick = onEditSelectedText ?: onAddPronunciationRule,
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                     modifier = Modifier.testTag("reader_add_rule_from_selection_button")
                 ) {
