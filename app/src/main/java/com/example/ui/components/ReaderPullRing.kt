@@ -55,13 +55,16 @@ fun ReaderPullRing(
         label = "pullSpin"
     )
 
-    val shift = (clamped * 30f).coerceAtMost(34f) * if (isPrev) 1f else -1f
+    // The ring lives in its own band at the edge of the screen. It used to slide in
+    // over the chapter title, which is the first thing on the page.
+    val bandDp = if (isPrev) 96f else 88f
+    val drift = (clamped * 10f).coerceAtMost(12f)
 
     Box(modifier = modifier.fillMaxSize(), contentAlignment = if (isPrev) Alignment.TopCenter else Alignment.BottomCenter) {
         Box(
             modifier = Modifier
-                .offset(y = if (isPrev) (shift + 24).dp else (shift - 36).dp)
-                .size(44.dp)
+                .offset(y = if (isPrev) (bandDp - drift).dp else (drift - bandDp).dp)
+                .size(40.dp)
                 .testTag("reader_pull_ring")
         ) {
             Canvas(Modifier.fillMaxSize()) {
