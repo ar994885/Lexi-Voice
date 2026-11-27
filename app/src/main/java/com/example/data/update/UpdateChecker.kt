@@ -31,7 +31,8 @@ object UpdateChecker {
     private const val REPO = "Lexi-voice"
     private const val USER_AGENT = "LexiVoice-Android"
 
-    suspend fun fetchLatest(): Result<UpdateInfo> = withContext(Dispatchers.IO) {
+    suspend fun fetchLatest(context: Context): Result<UpdateInfo> = withContext(Dispatchers.IO) {
+        val myPackage = context.packageName
         runCatching {
             val conn = URL("https://api.github.com/repos/$OWNER/$REPO/releases/latest")
                 .openConnection() as HttpURLConnection
@@ -50,16 +51,32 @@ object UpdateChecker {
 
                 var apkUrl: String? = null
                 var assetUpdatedAt = 0L
+                var fallbackUrl: String? = null
+                var fallbackUpdatedAt = 0L
                 val assets = root.optJSONArray("assets")
                 if (assets != null) {
                     for (i in 0 until assets.length()) {
                         val asset = assets.optJSONObject(i) ?: continue
-                        if (asset.optString("name").endsWith(".apk", ignoreCase = true)) {
-                            apkUrl = asset.optString("browser_download_url")
-                            assetUpdatedAt = parseGithubDate(asset.optString("updated_at"))
+                        val name = asset.optString("name")
+                        if (!name.endsWith(".apk", ignoreCase = true)) continue
+                        val url = asset.optString("browser_download_url")
+                        val updated = parseGithubDate(asset.optString("updated_at"))
+                        // A release carries one APK per flavour. Taking the first one
+                        // handed the Pro build to the standard app.
+                        if (flavourMatches(name, myPackage)) {
+                            apkUrl = url
+                            assetUpdatedAt = updated
                             break
                         }
+                        if (fallbackUrl == null) {
+                            fallbackUrl = url
+                            fallbackUpdatedAt = updated
+                        }
                     }
+                }
+                if (apkUrl == null && fallbackUrl != null) {
+                    apkUrl = fallbackUrl
+                    assetUpdatedAt = fallbackUpdatedAt
                 }
                 if (apkUrl.isNullOrBlank()) {
                     throw IllegalStateException(
@@ -96,6 +113,27 @@ object UpdateChecker {
      * keeps the download pointed at github.com and at this repository's release
      * path, so a redirected asset cannot be substituted for something else.
      */
+    /**
+     * Release assets are named per flavour (LexiVoice-… and LexiVoice-Pro-…). The
+     * installed package is the authority: a standard install must never be offered
+     * the Pro APK, and the other way round.
+     */
+    private fun flavourMatches(assetName: String, packageName: String): Boolean {
+        val wantsPro = packageName.endsWith(".pro", ignoreCase = true)
+        val nameSaysPro = assetName.contains("pro", ignoreCase = true)
+        return wantsPro == nameSaysPro
+    }
+
+    /**
+     * Reads the package name out of the downloaded file. Android would install a
+     * differently-named package as a second app rather than as an update, so this
+     * is the check that stops a wrong-flavour download before the installer runs.
+     */
+    private fun downloadedPackageName(context: Context, apk: File): String? =
+        runCatching {
+            context.packageManager.getPackageArchiveInfo(apk.absolutePath, 0)?.packageName
+        }.getOrNull()
+
     private fun isOwnReleaseAsset(url: String): Boolean {
         val parsed = runCatching { URL(url) }.getOrNull() ?: return false
         val host = parsed.host.lowercase()
@@ -207,6 +245,15 @@ object UpdateChecker {
             }
         } finally {
             conn.disconnect()
+        }
+
+        val downloadedPackage = downloadedPackageName(context, target)
+        if (downloadedPackage != context.packageName) {
+            runCatching { target.delete() }
+            throw IllegalStateException(
+                "This release's APK is for " + (downloadedPackage ?: "an unknown app") +
+                    ", not for " + context.packageName
+            )
         }
         target
     }
