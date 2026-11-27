@@ -129,6 +129,30 @@ class LibraryRepository(
         entity
     }
 
+    /**
+     * The document id of a SAF URI, which is what identifies a file rather than the
+     * route it was reached by. The picker hands out
+     * content://authority/document/<id>; a folder scan stores
+     * content://authority/tree/<tree>/document/<id> for the same file.
+     */
+    private fun documentIdOf(fileKey: String): String? =
+        fileKey.substringAfterLast("/document/", "").takeIf { it.isNotBlank() }
+
+    /**
+     * True when this exact file is already indexed from a folder the user added.
+     *
+     * Deliberately exact: the document id has to match, so two different books that
+     * happen to share a title and a size are never confused for one another.
+     */
+    suspend fun findFolderDuplicateForImport(uri: Uri): BookEntity? = withContext(Dispatchers.IO) {
+        val pickedId = documentIdOf(uri.toString()) ?: return@withContext null
+        bookDao.getAllBooksOnce().firstOrNull { existing ->
+            existing.folderKey != SINGLE_IMPORTS_FOLDER &&
+                !existing.folderKey.startsWith(MEDIASTORE_FOLDER_PREFIX) &&
+                documentIdOf(existing.fileKey) == pickedId
+        }
+    }
+
     suspend fun importSingleEpubUri(uri: Uri): BookEntity? = withContext(Dispatchers.IO) {
         val doc = DocumentFile.fromSingleUri(context, uri)
         val name = doc?.name ?: uri.lastPathSegment ?: "Imported.epub"
