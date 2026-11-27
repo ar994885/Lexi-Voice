@@ -860,11 +860,21 @@ var lexiEmitSelection = function() {
             offsetEnd = window.lexiTextOffsetWithin(sentSpan, r0.endContainer, r0.endOffset);
           }
         } catch (e0) {}
+        var occurrenceIndex = 0;
+        try {
+          var preRange = document.createRange();
+          preRange.setStart(document.body, 0);
+          preRange.setEnd(range.startContainer, range.startOffset);
+          var preText = preRange.toString();
+          var at = -1;
+          while ((at = preText.indexOf(sel, at + 1)) !== -1) occurrenceIndex++;
+        } catch (eOcc) {}
         var payloadJson = JSON.stringify({
           text: sel,
           sentenceIndex: sentIdx,
           startOffset: offsetStart,
           endOffset: offsetEnd,
+          occurrenceIndex: occurrenceIndex,
           top: rect ? rect.top : 0,
           bottom: rect ? rect.bottom : 0,
           left: rect ? rect.left : 0,
