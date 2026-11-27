@@ -298,6 +298,16 @@ private class LexiBookWebView(context: Context) : WebView(context) {
                     } else if (atTop && dy > 24f && hasPrevChapter) {
                         activePull = ChapterPullDirection.PREV
                     }
+                    if (activePull != ChapterPullDirection.NONE) {
+                        // A vertical drag over text otherwise starts a selection and
+                        // leaves a stray blue span behind.
+                        runCatching {
+                            evaluateJavascript(
+                                "window.lexiSuppressSelection && window.lexiSuppressSelection();",
+                                null
+                            )
+                        }
+                    }
                 }
 
                 when (activePull) {
@@ -324,6 +334,12 @@ private class LexiBookWebView(context: Context) : WebView(context) {
                 }
                 activePull = ChapterPullDirection.NONE
                 currentProgress = 0f
+                runCatching {
+                    evaluateJavascript(
+                        "window.lexiRestoreSelection && window.lexiRestoreSelection();",
+                        null
+                    )
+                }
                 onPullStateChanged?.invoke(ChapterPullDirection.NONE, 0f)
                 if (firedDir != ChapterPullDirection.NONE) {
                     onPullTriggered?.invoke(firedDir)
@@ -1039,72 +1055,6 @@ webViewRef = null
 )
 }
 }
-AnimatedVisibility(
-visible = !effectivePagedMode && pullDir == ChapterPullDirection.PREV,
-enter = fadeIn(),
-exit = fadeOut(),
-modifier = Modifier
-.align(Alignment.TopCenter)
-.padding(top = 12.dp)
-) {
-val ready = pullProgress >= 1.0f
-Surface(
-shape = RoundedCornerShape(24.dp),
-color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-shadowElevation = 6.dp
-) {
-Row(
-modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-verticalAlignment = Alignment.CenterVertically,
-horizontalArrangement = Arrangement.Center
-) {
-Icon(
-imageVector = Icons.Default.ArrowDownward,
-contentDescription = null,
-tint = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-)
-Spacer(Modifier.width(8.dp))
-Text(
-text = if (ready) "Release for Previous Chapter" else "Pull down for Previous Chapter",
-style = MaterialTheme.typography.labelLarge,
-color = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-)
-}
-}
-}
-AnimatedVisibility(
-visible = !effectivePagedMode && pullDir == ChapterPullDirection.NEXT,
-enter = fadeIn(),
-exit = fadeOut(),
-modifier = Modifier
-.align(Alignment.BottomCenter)
-.padding(bottom = 14.dp)
-) {
-val ready = pullProgress >= 1.0f
-Surface(
-shape = RoundedCornerShape(24.dp),
-color = if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-shadowElevation = 6.dp
-) {
-Row(
-modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-verticalAlignment = Alignment.CenterVertically,
-horizontalArrangement = Arrangement.Center
-) {
-Icon(
-imageVector = Icons.Default.ArrowUpward,
-contentDescription = null,
-tint = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-)
-Spacer(Modifier.width(8.dp))
-Text(
-text = if (ready) "Release to load Next Chapter" else "Pull up to load Next Chapter",
-style = MaterialTheme.typography.labelLarge,
-color = if (ready) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-)
-}
-}
-}
 }
 }
 private fun Color.toCssHex(): String {
@@ -1378,6 +1328,11 @@ internal fun buildThemeInjectionScript(
         a { color: $linkHex !important; }
         table { border-collapse: collapse; max-width: 100% !important; }
         th, td { border-color: $borderHex; }
+        body.lexi-no-select, body.lexi-no-select * {
+            -webkit-user-select: none !important;
+            user-select: none !important;
+            -webkit-touch-callout: none !important;
+        }
         ruby { ruby-align: center; }
         rt { font-size: 0.55em; line-height: 1.1; }
         .lexi-s {
@@ -1429,6 +1384,17 @@ internal fun buildThemeInjectionScript(
               if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
               window.__lexiAnimateRaw(el, frames, opts);
             } catch (e) { /* animation is decoration */ }
+          };
+
+          window.lexiSuppressSelection = function () {
+            try {
+              document.body.classList.add('lexi-no-select');
+              var sel = window.getSelection ? window.getSelection() : null;
+              if (sel && sel.removeAllRanges) sel.removeAllRanges();
+            } catch (e) {}
+          };
+          window.lexiRestoreSelection = function () {
+            try { document.body.classList.remove('lexi-no-select'); } catch (e) {}
           };
 
           window.lexiPageFade = function () {
