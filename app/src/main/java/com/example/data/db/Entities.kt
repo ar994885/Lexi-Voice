@@ -153,5 +153,9 @@ data class PronunciationRuleEntity(
     /** Anchor for a WORD-scoped term: the sentence it was selected in, and the range. */
     val sentenceIndex: Int = 0,
     val startOffset: Int = 0,
-    val endOffset: Int = 0
+    val endOffset: Int = 0,
+    /** Zip path of the chapter this term is anchored in; empty for whole-book terms. */
+    val chapterKey: String = "",
+    /** How many occurrences of the original text precede the anchor in that chapter. */
+    val occurrenceIndex: Int = 0
 )
