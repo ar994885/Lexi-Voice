@@ -42,6 +42,7 @@ fun ReaderEditedTermsSheet(
         original: String,
         replacement: String,
         termScope: String,
+        matchCase: Boolean,
         sentenceIndex: Int,
         startOffset: Int,
         endOffset: Int
@@ -125,8 +126,8 @@ fun ReaderEditedTermsSheet(
                 creating = false
                 editing = null
             },
-            onConfirm = { original, replacement, scope, sentence, start, end ->
-                onSave(target?.id ?: 0L, original, replacement, scope, sentence, start, end)
+            onConfirm = { original, replacement, scope, matchCase, sentence, start, end ->
+                onSave(target?.id ?: 0L, original, replacement, scope, matchCase, sentence, start, end)
                 creating = false
                 editing = null
             }
@@ -139,11 +140,12 @@ private fun EditorDialog(
     existing: PronunciationRuleEntity?,
     prefillOriginal: String = "",
     onDismiss: () -> Unit,
-    onConfirm: (String, String, String, Int, Int, Int) -> Unit
+    onConfirm: (String, String, String, Boolean, Int, Int, Int) -> Unit
 ) {
     var original by remember { mutableStateOf(existing?.findText ?: prefillOriginal) }
     var replacement by remember { mutableStateOf(existing?.replaceWith ?: "") }
     var scope by remember { mutableStateOf(existing?.termScope ?: "BOOK") }
+    var matchCase by remember { mutableStateOf(existing?.matchCase ?: false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -181,6 +183,14 @@ private fun EditorDialog(
                         modifier = Modifier.testTag("edited_term_scope_book")
                     )
                 }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    androidx.compose.material3.Checkbox(
+                        checked = matchCase,
+                        onCheckedChange = { matchCase = it },
+                        modifier = Modifier.testTag("edited_term_match_case")
+                    )
+                    Text("Match case", style = MaterialTheme.typography.bodyMedium)
+                }
                 Text(
                     text = if (scope == "WORD") {
                         "Only the occurrence you selected is changed."
@@ -200,6 +210,7 @@ private fun EditorDialog(
                             original,
                             replacement,
                             scope,
+                            matchCase,
                             existing?.sentenceIndex ?: 0,
                             existing?.startOffset ?: 0,
                             existing?.endOffset ?: 0
