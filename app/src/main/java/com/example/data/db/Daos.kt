@@ -406,6 +406,12 @@ interface PronunciationRuleDao {
     )
     fun observeRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>>
 
+    @Query("SELECT * FROM pronunciation_rules WHERE kind = 'TERM' AND scope = 'BOOK' AND bookId = :bookId ORDER BY id DESC")
+    fun observeTermRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>>
+
+    @Query("SELECT * FROM pronunciation_rules WHERE kind = 'TERM' AND scope = 'BOOK' AND bookId = :bookId AND isEnabled = 1")
+    suspend fun getEnabledTermRulesForBook(bookId: Long): List<PronunciationRuleEntity>
+
     @Query("SELECT * FROM pronunciation_rules ORDER BY CASE WHEN scope = 'BOOK' THEN 0 ELSE 1 END, id ASC")
     suspend fun getAllRulesOnce(): List<PronunciationRuleEntity>
 

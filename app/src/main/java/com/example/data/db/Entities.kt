@@ -145,5 +145,13 @@ data class PronunciationRuleEntity(
     val wholeWordOnly: Boolean = true,
     val isEnabled: Boolean = true,
     val applyToAudio: Boolean = true,
-    val applyToReaderText: Boolean = false
+    val applyToReaderText: Boolean = false,
+    /** TTS = pronunciation rule. TERM = edited term shown in the reader and exported. */
+    val kind: String = "TTS",
+    /** WORD = only the anchored occurrence. BOOK = every occurrence in this book. */
+    val termScope: String = "BOOK",
+    /** Anchor for a WORD-scoped term: the sentence it was selected in, and the range. */
+    val sentenceIndex: Int = 0,
+    val startOffset: Int = 0,
+    val endOffset: Int = 0
 )

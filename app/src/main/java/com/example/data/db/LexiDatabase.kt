@@ -27,7 +27,7 @@ class LexiTypeConverters {
         BookmarkEntity::class,
         ShelfEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(LexiTypeConverters::class)
@@ -160,6 +160,16 @@ abstract class LexiDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `pronunciation_rules` ADD COLUMN `kind` TEXT NOT NULL DEFAULT 'TTS'")
+                db.execSQL("ALTER TABLE `pronunciation_rules` ADD COLUMN `termScope` TEXT NOT NULL DEFAULT 'BOOK'")
+                db.execSQL("ALTER TABLE `pronunciation_rules` ADD COLUMN `sentenceIndex` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `pronunciation_rules` ADD COLUMN `startOffset` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `pronunciation_rules` ADD COLUMN `endOffset` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): LexiDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -167,7 +177,7 @@ abstract class LexiDatabase : RoomDatabase() {
                     LexiDatabase::class.java,
                     "lexivoice_library.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .build()
                     .also { INSTANCE = it }
             }
