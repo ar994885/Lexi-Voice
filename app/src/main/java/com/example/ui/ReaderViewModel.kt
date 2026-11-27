@@ -22,6 +22,7 @@ import com.example.tts.TtsPlaybackService
 import com.example.tts.TtsSessionContent
 import com.example.tts.TtsSourceType
 import com.example.tts.TtsStateHolder
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -183,6 +184,63 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private val _editedTerms = MutableStateFlow<List<com.example.data.db.PronunciationRuleEntity>>(emptyList())
+    val editedTerms: StateFlow<List<com.example.data.db.PronunciationRuleEntity>> = _editedTerms
+
+    private var termsJob: Job? = null
+
+    private fun observeEditedTerms(bookId: Long) {
+        termsJob?.cancel()
+        termsJob = viewModelScope.launch {
+            app.pronunciationRepository.observeTermRulesForBook(bookId).collect { list ->
+                _editedTerms.value = list
+            }
+        }
+    }
+
+    /**
+     * A term edit is stored as a book-scoped rule that changes the page and the
+     * export, and never the spoken voice.
+     */
+    fun saveEditedTerm(
+        id: Long,
+        original: String,
+        replacement: String,
+        termScope: String,
+        sentenceIndex: Int,
+        startOffset: Int,
+        endOffset: Int
+    ) {
+        val book = _uiState.value.book ?: return
+        viewModelScope.launch {
+            app.pronunciationRepository.saveRule(
+                id = id,
+                findText = original,
+                replaceWith = replacement,
+                scope = com.example.data.db.PronunciationScope.BOOK,
+                bookId = book.id,
+                matchCase = false,
+                wholeWordOnly = true,
+                isEnabled = true,
+                applyToAudio = false,
+                applyToReaderText = true,
+                kind = "TERM",
+                termScope = termScope,
+                sentenceIndex = sentenceIndex,
+                startOffset = startOffset,
+                endOffset = endOffset
+            )
+            app.backupSyncRepository.scheduleAutoMirror()
+        }
+    }
+
+    fun deleteEditedTerm(id: Long) {
+        viewModelScope.launch {
+            app.pronunciationRepository.deleteRule(id)
+            app.backupSyncRepository.scheduleAutoMirror()
+        }
+    }
+
     fun saveHighlight(
         sentenceIndex: Int,
         selectedText: String,
@@ -286,6 +344,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openBook(bookId: Long) {
+        observeEditedTerms(bookId)
         viewModelScope.launch {
             _uiState.value = ReaderUiState(isLoading = true)
             val book = libraryRepo.getBookById(bookId)
