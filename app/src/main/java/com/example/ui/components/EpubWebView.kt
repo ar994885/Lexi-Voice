@@ -86,6 +86,7 @@ import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.zip.ZipFile
 import kotlin.math.abs
+import kotlin.math.pow
 
 enum class ChapterPullDirection {
     NONE,
@@ -213,6 +214,11 @@ private class LexiBookWebView(context: Context) : WebView(context) {
         }
     }
 
+    private fun pullProgressFor(pullPx: Float): Float {
+        val ratio = (pullPx / triggerThresholdPx).coerceIn(0f, 1.3f)
+        return ratio.pow(1.35f).coerceIn(0f, 1.3f)
+    }
+
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
         if (isPagedMode && !isDestroyedOrDead && isAttachedToWindow && (w != ow || h != oh) && w > 0 && h > 0) {
@@ -313,13 +319,15 @@ private class LexiBookWebView(context: Context) : WebView(context) {
                 when (activePull) {
                     ChapterPullDirection.NEXT -> {
                         val pullPx = (-dy - 24f).coerceAtLeast(0f)
-                        currentProgress = (pullPx / triggerThresholdPx).coerceIn(0f, 1.3f)
+                        // Resistance: progress trails the finger, so the further you
+                        // pull the more it costs. A linear ratio felt weightless.
+                        currentProgress = pullProgressFor(pullPx)
                         onPullStateChanged?.invoke(ChapterPullDirection.NEXT, currentProgress)
                         if (pullPx > 8f) return true
                     }
                     ChapterPullDirection.PREV -> {
                         val pullPx = (dy - 24f).coerceAtLeast(0f)
-                        currentProgress = (pullPx / triggerThresholdPx).coerceIn(0f, 1.3f)
+                        currentProgress = pullProgressFor(pullPx)
                         onPullStateChanged?.invoke(ChapterPullDirection.PREV, currentProgress)
                         if (pullPx > 8f) return true
                     }
@@ -987,6 +995,7 @@ if (window.lexiRecalcPagination) {
 window.lexiRecalcPagination($initPage);
 }
 $anchorJs
+${if (initPage < 0) "setTimeout(function(){ if (window.lexiScrollToEnd) window.lexiScrollToEnd(); }, 60);" else ""}
 ${if (activeIdx >= 0) "setTimeout(function(){ window.lexiHighlightSentence && window.lexiHighlightSentence($activeIdx, true); }, 60);" else ""}
 })();
 """.trimIndent(),
@@ -1384,6 +1393,15 @@ internal fun buildThemeInjectionScript(
               if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
               window.__lexiAnimateRaw(el, frames, opts);
             } catch (e) { /* animation is decoration */ }
+          };
+
+          // A negative initial page means "the end of this chapter". Paged mode
+          // understood that; scroll mode ignored it, so going back a chapter always
+          // opened at its first line.
+          window.lexiScrollToEnd = function () {
+            try {
+              window.scrollTo(0, document.body.scrollHeight);
+            } catch (e) {}
           };
 
           window.lexiSuppressSelection = function () {
