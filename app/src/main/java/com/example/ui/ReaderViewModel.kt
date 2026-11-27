@@ -209,9 +209,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         termScope: String,
         sentenceIndex: Int,
         startOffset: Int,
-        endOffset: Int,
-        chapterKey: String = "",
-        occurrenceIndex: Int = 0
+        endOffset: Int
     ) {
         val book = _uiState.value.book ?: return
         viewModelScope.launch {
@@ -230,9 +228,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 termScope = termScope,
                 sentenceIndex = sentenceIndex,
                 startOffset = startOffset,
-                endOffset = endOffset,
-                chapterKey = chapterKey,
-                occurrenceIndex = occurrenceIndex
+                endOffset = endOffset
             )
             app.backupSyncRepository.scheduleAutoMirror()
         }
@@ -538,7 +534,7 @@ return
 }
 viewModelScope.launch {
 val visualRules = withContext(Dispatchers.IO) {
-app.pronunciationRepository.getEnabledRulesForReaderDisplay(book.id)
+app.pronunciationRepository.getRulesForExport(book.id)
 }
 val result = EpubExporter.exportEditedEpubToUri(
 context = app,
