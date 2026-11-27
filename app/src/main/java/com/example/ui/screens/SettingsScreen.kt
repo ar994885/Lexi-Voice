@@ -591,7 +591,7 @@ fun SettingsScreen(
                                 scope.launch {
                                     updateBusy = true
                                     updateMessage = "Checking for updates\u2026"
-                                    val result = com.example.data.update.UpdateChecker.fetchLatest()
+                                    val result = com.example.data.update.UpdateChecker.fetchLatest(context)
                                     val info = result.getOrNull()
                                     if (info == null) {
                                         updateMessage = "Could not check: " +
