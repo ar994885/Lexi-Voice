@@ -9,6 +9,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
 import org.jsoup.parser.Parser
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -209,6 +212,53 @@ object EpubExporter {
         )
     }
 
+    /**
+     * Applies a "this word" term to the one occurrence it was anchored to: the
+     * [PronunciationRuleEntity.occurrenceIndex]-th match of the original text inside
+     * the chapter named by [PronunciationRuleEntity.chapterKey].
+     */
+    private fun applyAnchoredTerms(
+        root: Node,
+        rules: List<PronunciationRuleEntity>,
+        entryName: String
+    ) {
+        val anchored = rules.filter {
+            it.kind == "TERM" && it.termScope == "WORD" && it.isEnabled && it.findText.isNotBlank()
+        }
+        if (anchored.isEmpty()) return
+        val entry = entryName.replace('\\', '/')
+        for (rule in anchored) {
+            val key = rule.chapterKey.replace('\\', '/').trimStart('/')
+            if (key.isNotBlank() && !entry.endsWith(key)) continue
+            var skip = rule.occurrenceIndex.coerceAtLeast(0)
+            var done = false
+            fun walk(node: Node) {
+                if (done) return
+                if (node is Element &&
+                    node.tagName().lowercase(Locale.ROOT) in setOf("script", "style", "svg", "noscript", "rt", "rp")
+                ) return
+                if (node is TextNode) {
+                    val text = node.wholeText
+                    var at = text.indexOf(rule.findText)
+                    while (at >= 0) {
+                        if (skip == 0) {
+                            node.text(
+                                text.substring(0, at) + rule.replaceWith +
+                                    text.substring(at + rule.findText.length)
+                            )
+                            done = true
+                            return
+                        }
+                        skip--
+                        at = text.indexOf(rule.findText, at + rule.findText.length)
+                    }
+                }
+                node.childNodes().forEach { walk(it) }
+            }
+            walk(root)
+        }
+    }
+
     internal fun transformHtmlDocumentBytes(
         rawBytes: ByteArray,
         entryName: String,
@@ -233,12 +283,16 @@ object EpubExporter {
         }
 
         val bodyNode = doc.selectFirst("body") ?: doc
+        // Anchored terms are applied one at a time, by occurrence, so a "this word"
+        // edit cannot leak into the other places that word appears.
+        val textWideRules = visualRules.filterNot { it.kind == "TERM" && it.termScope == "WORD" }
         PronunciationProcessor.applyReaderRulesToTextNodes(
             root = bodyNode,
-            rules = visualRules,
+            rules = textWideRules,
             bookId = bookId,
             skipTags = setOf("script", "style", "svg", "noscript", "rt", "rp")
         )
+        applyAnchoredTerms(bodyNode, visualRules, entryName)
         val titleEl = doc.selectFirst("head > title, title")
         if (titleEl != null) {
             PronunciationProcessor.applyReaderRulesToTextNodes(
