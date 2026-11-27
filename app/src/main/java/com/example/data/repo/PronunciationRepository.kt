@@ -22,6 +22,14 @@ class PronunciationRepository(
         dao.getEnabledRulesForReaderDisplay(bookId)
             .filterNot { it.kind == "TERM" && it.termScope == "WORD" }
 
+    /**
+     * Reader-display rules including anchored ("this word") terms. The reader filters
+     * those out because it applies them by range, but the exporter needs them: it
+     * applies them itself, one occurrence at a time.
+     */
+    suspend fun getRulesForExport(bookId: Long?): List<PronunciationRuleEntity> =
+        dao.getEnabledRulesForReaderDisplay(bookId)
+
     fun observeTermRulesForBook(bookId: Long): Flow<List<PronunciationRuleEntity>> =
         dao.observeTermRulesForBook(bookId)
 
@@ -40,9 +48,7 @@ class PronunciationRepository(
         termScope: String = "BOOK",
         sentenceIndex: Int = 0,
         startOffset: Int = 0,
-        endOffset: Int = 0,
-        chapterKey: String = "",
-        occurrenceIndex: Int = 0
+        endOffset: Int = 0
     ): Long {
         val normalizedBookId = if (scope == PronunciationScope.BOOK) bookId?.takeIf { it > 0L } else null
         val entity = PronunciationRuleEntity(
@@ -60,9 +66,7 @@ class PronunciationRepository(
             termScope = termScope,
             sentenceIndex = sentenceIndex,
             startOffset = startOffset,
-            endOffset = endOffset,
-            chapterKey = chapterKey,
-            occurrenceIndex = occurrenceIndex
+            endOffset = endOffset
         )
         val resultId = if (id > 0L) {
             dao.updateRule(entity)
