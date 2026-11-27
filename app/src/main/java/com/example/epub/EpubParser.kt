@@ -670,6 +670,23 @@ object EpubParser {
                         });
                       };
 
+                      // A WORD-scoped edited term: replace exactly the anchored range,
+                      // leaving the rest of the sentence and its inline markup alone.
+                      window.lexiApplyAnchoredTerms = function(terms) {
+                        if (!Array.isArray(terms)) return;
+                        for (var i = 0; i < terms.length; i++) {
+                          var t = terms[i];
+                          var span = document.querySelector('.lexi-s[data-idx="' + t.sentenceIndex + '"]');
+                          if (!span) continue;
+                          var range = window.lexiRangeWithin(span, t.startOffset, t.endOffset, t.findText);
+                          if (!range) continue;
+                          try {
+                            range.deleteContents();
+                            range.insertNode(document.createTextNode(t.replaceWith));
+                          } catch (e) {}
+                        }
+                      };
+
                       // Tapping a highlight opens its note. The ranges are plain objects,
                       // so hit-testing is done against the stored range list.
                       document.addEventListener('click', function(ev) {
