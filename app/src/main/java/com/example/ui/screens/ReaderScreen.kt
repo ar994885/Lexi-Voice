@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Highlight
@@ -193,6 +194,8 @@ fun ReaderScreen(
     var showSearchSheet by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
     var showHighlightsSheet by remember { mutableStateOf(false) }
+    var showEditedTermsSheet by remember { mutableStateOf(false) }
+    val editedTerms by viewModel.editedTerms.collectAsStateWithLifecycle()
     // Chapter-pull gesture feedback: direction, tension, and the brief commit spin.
     var pullDirection by remember { mutableIntStateOf(0) }
     var pullProgress by remember { mutableFloatStateOf(0f) }
@@ -1011,6 +1014,17 @@ fun ReaderScreen(
                                     modifier = Modifier.testTag("reader_menu_read_aloud")
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("Edited Terms (${editedTerms.size})") },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Edit, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        showEditedTermsSheet = true
+                                    },
+                                    modifier = Modifier.testTag("reader_menu_edited_terms")
+                                )
+                                DropdownMenuItem(
                                     text = {
                                         val highlightCount = allBookmarksAndHighlights.count { it.type == "HIGHLIGHT" }
                                         Text("Highlights ($highlightCount)")
@@ -1234,6 +1248,17 @@ fun ReaderScreen(
                 viewModel.requestJumpToLocation(bookId, hit.chapterIndex, hit.sentenceIndex)
             },
             onDismiss = { showSearchSheet = false }
+        )
+    }
+
+    if (showEditedTermsSheet) {
+        com.example.ui.components.ReaderEditedTermsSheet(
+            terms = editedTerms,
+            onSave = { id, original, replacement, scope, sentence, start, end ->
+                viewModel.saveEditedTerm(id, original, replacement, scope, sentence, start, end)
+            },
+            onDelete = { id -> viewModel.deleteEditedTerm(id) },
+            onDismiss = { showEditedTermsSheet = false }
         )
     }
 
