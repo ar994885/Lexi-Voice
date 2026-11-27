@@ -497,6 +497,7 @@ fun EpubWebView(
     onPullPrevChapter: () -> Unit,
     onPullNextChapter: () -> Unit,
     onEndOfBookReached: () -> Unit = {},
+    onPullProgress: (ChapterPullDirection, Float) -> Unit = { _, _ -> },
     onScrollChanged: (Int) -> Unit = {},
     onTextSelectedWithSentence: (String, Int) -> Unit = { _, _ -> },
     onTextSelectedWithRect: (TextSelectionRectInfo) -> Unit = {},
@@ -532,6 +533,7 @@ fun EpubWebView(
     val latestEnableSentenceTap by rememberUpdatedState(enableSentenceTap)
     val latestOnSentenceTapped by rememberUpdatedState(onSentenceTapped)
     val latestOnPullPrev by rememberUpdatedState(onPullPrevChapter)
+    val latestOnPullProgress by rememberUpdatedState(onPullProgress)
     val latestOnPullNext by rememberUpdatedState(onPullNextChapter)
     val latestOnEndOfBook by rememberUpdatedState(onEndOfBookReached)
     val latestOnScroll by rememberUpdatedState(onScrollChanged)
@@ -827,6 +829,7 @@ post { if (!this@apply.isDestroyedOrDead) latestOnInternalLink(url) }
 onPullStateChanged = { dir, prog ->
 pullDir = dir
 pullProgress = prog
+post { if (!this@apply.isDestroyedOrDead) latestOnPullProgress(dir, prog) }
 }
 onPullTriggered = { dir ->
 when (dir) {
