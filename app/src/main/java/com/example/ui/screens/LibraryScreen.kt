@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.content.Intent
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Environment
@@ -150,6 +151,11 @@ fun LibraryScreen(
     val scanProgress by viewModel.scanProgress.collectAsStateWithLifecycle()
 
     var showSortMenu by remember { mutableStateOf(false) }
+    var showAddMenu by remember { mutableStateOf(false) }
+    // Set when the picked file is already indexed from a folder the user added.
+    var pendingDuplicateUri by remember { mutableStateOf<Uri?>(null) }
+    var duplicateTitle by remember { mutableStateOf("") }
+    var duplicateFolder by remember { mutableStateOf("") }
     var showViewDensityMenu by remember { mutableStateOf(false) }
     var showLanguageMenu by remember { mutableStateOf(false) }
     var showNewShelfDialog by remember { mutableStateOf(false) }
@@ -225,8 +231,16 @@ fun LibraryScreen(
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
-            viewModel.importSingleEpub(uri) { bookId ->
-                onOpenBook(bookId)
+            viewModel.findImportDuplicate(uri) { existing ->
+                if (existing == null) {
+                    viewModel.importSingleEpub(uri) { bookId ->
+                        onOpenBook(bookId)
+                    }
+                } else {
+                    duplicateTitle = existing.title
+                    duplicateFolder = existing.parentFolderName.ifBlank { "a watched folder" }
+                    pendingDuplicateUri = uri
+                }
             }
         }
     }
@@ -243,15 +257,43 @@ fun LibraryScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = { folderPickerLauncher.launch(null) },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier
-                    .navigationBarsPadding()
-                    .testTag("add_folder_fab")
-            ) {
-                Icon(Icons.Default.CreateNewFolder, contentDescription = "Add Book Folder")
+            // One button, two ways in. Opening the folder picker straight away hid
+            // the fact that a single EPUB can be imported without adding a folder.
+            Box {
+                FloatingActionButton(
+                    onClick = { showAddMenu = true },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier
+                        .navigationBarsPadding()
+                        .testTag("add_folder_fab")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Add books")
+                }
+                DropdownMenu(
+                    expanded = showAddMenu,
+                    onDismissRequest = { showAddMenu = false },
+                    modifier = Modifier.testTag("library_add_menu")
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Open EPUB") },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null) },
+                        onClick = {
+                            showAddMenu = false
+                            singleEpubLauncher.launch(arrayOf("application/epub+zip", "*/*"))
+                        },
+                        modifier = Modifier.testTag("library_add_open_epub")
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Add Folder") },
+                        leadingIcon = { Icon(Icons.Default.CreateNewFolder, contentDescription = null) },
+                        onClick = {
+                            showAddMenu = false
+                            folderPickerLauncher.launch(null)
+                        },
+                        modifier = Modifier.testTag("library_add_folder")
+                    )
+                }
             }
         }
     ) { innerPadding ->
@@ -889,6 +931,47 @@ fun LibraryScreen(
             dismissButton = {
                 TextButton(onClick = { showShelfPickerForBook = null }) {
                     Text("Close")
+                }
+            }
+        )
+    }
+
+    // Importing a file that a watched folder already indexed. The user decides:
+    // a second copy, or a refresh of what is there.
+    val duplicateUri = pendingDuplicateUri
+    if (duplicateUri != null) {
+        AlertDialog(
+            onDismissRequest = { pendingDuplicateUri = null },
+            title = { Text("Already in your library") },
+            text = {
+                Text(
+                    "\"$duplicateTitle\" is already indexed from \"$duplicateFolder\".\n\n" +
+                        "Adding it again puts a second copy in your library. If you only wanted " +
+                        "to pick up changes to that file, refresh the library instead."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDuplicateUri = null
+                        viewModel.importSingleEpub(duplicateUri) { bookId -> onOpenBook(bookId) }
+                    },
+                    modifier = Modifier.testTag("duplicate_import_add_anyway")
+                ) { Text("Add anyway") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            pendingDuplicateUri = null
+                            viewModel.syncNow()
+                        },
+                        modifier = Modifier.testTag("duplicate_import_refresh")
+                    ) { Text("Refresh library") }
+                    TextButton(
+                        onClick = { pendingDuplicateUri = null },
+                        modifier = Modifier.testTag("duplicate_import_cancel")
+                    ) { Text("Cancel") }
                 }
             }
         )
