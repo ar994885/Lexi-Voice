@@ -15,4 +15,37 @@
     <string name="select_all">Select All</string>
     <string name="deselect_all">Deselect All</string>
     <string name="range_select">Range Select</string>
+
+    <!-- Phase 1 — navigation shell -->
+    <string name="tab_listen">Listen</string>
+    <string name="tab_studio">Studio</string>
+    <string name="cd_back">Back</string>
+    <string name="more_sheet_title">More</string>
+    <string name="more_quick_listen">Quick Listen</string>
+    <string name="more_book_folders">Book folders</string>
+
+    <!-- Phase 1 — S11 Studio (placeholder) -->
+    <string name="studio_title">Studio</string>
+    <string name="studio_tile_create_title">Create audiobook</string>
+    <string name="studio_tile_create_body">Turn a book into MP3 chapters or one M4B file.</string>
+    <string name="studio_tile_export_title">Export edited book</string>
+    <string name="studio_tile_export_body">Save a copy with your text replacements and new details.</string>
+    <string name="studio_tile_build_title">Build from audio files</string>
+    <string name="studio_tile_build_body">Combine MP3 or WAV files you already have into one audiobook.</string>
+    <string name="studio_recent_title">Recent</string>
+    <string name="studio_recent_empty">No exports yet.</string>
+    <string name="studio_pick_book_title">Choose a book</string>
+    <string name="studio_pick_book_empty">Add a book to the Library first.</string>
+    <string name="studio_pick_book_library">Go to Library</string>
+
+    <!-- Phase 1 — S4 Book (stub) -->
+    <string name="book_read">Read</string>
+    <string name="book_listen">Listen</string>
+    <string name="book_create_audiobook">Create audiobook</string>
+    <string name="book_export">Export</string>
+    <string name="book_export_edited">Export edited book</string>
+    <string name="book_meta">%1$d chapters · %2$s · EPUB</string>
+    <string name="book_progress">%1$d%% · Chapter %2$d of %3$d</string>
+    <string name="book_export_done">Saved the edited EPUB.</string>
+    <string name="book_export_failed">Could not export this book.</string>
 </resources>
