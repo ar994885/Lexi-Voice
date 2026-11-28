@@ -1,8 +1,8 @@
 diff --git a/app/src/main/java/com/example/MainActivity.kt b/app/src/main/java/com/example/MainActivity.kt
-index a333dfe..34aa3b4 100644
+index a333dfe..e01eb07 100644
 --- a/app/src/main/java/com/example/MainActivity.kt
 +++ b/app/src/main/java/com/example/MainActivity.kt
-@@ -6,53 +6,58 @@ import android.content.pm.PackageManager
+@@ -6,53 +6,57 @@ import android.content.pm.PackageManager
  import android.os.Build
  import android.os.Bundle
  import android.view.KeyEvent
@@ -18,7 +18,6 @@ index a333dfe..34aa3b4 100644
 +import androidx.compose.foundation.layout.Row
  import androidx.compose.foundation.layout.Spacer
 +import androidx.compose.foundation.layout.WindowInsets
-+import androidx.compose.foundation.layout.calculateBottomPadding
  import androidx.compose.foundation.layout.fillMaxSize
 +import androidx.compose.foundation.layout.fillMaxWidth
  import androidx.compose.foundation.layout.height
@@ -73,7 +72,7 @@ index a333dfe..34aa3b4 100644
  import androidx.compose.ui.unit.dp
  import androidx.core.content.ContextCompat
  import androidx.lifecycle.compose.collectAsStateWithLifecycle
-@@ -64,6 +69,8 @@ import androidx.navigation.compose.composable
+@@ -64,6 +68,8 @@ import androidx.navigation.compose.composable
  import androidx.navigation.compose.currentBackStackEntryAsState
  import androidx.navigation.compose.rememberNavController
  import androidx.navigation.navArgument
@@ -82,7 +81,7 @@ index a333dfe..34aa3b4 100644
  import com.example.overlay.FloatingOverlayController
  import com.example.overlay.UnifiedOverlaySource
  import com.example.tts.TtsPlaybackService
-@@ -72,6 +79,7 @@ import com.example.ui.LibraryViewModel
+@@ -72,6 +78,7 @@ import com.example.ui.LibraryViewModel
  import com.example.ui.ReaderViewModel
  import com.example.ui.components.InAppFloatingTtsPopup
  import com.example.ui.screens.AudiobooksScreen
@@ -90,7 +89,7 @@ index a333dfe..34aa3b4 100644
  import com.example.ui.screens.FoldersAndPermissionsScreen
  import com.example.ui.screens.LibraryScreen
  import com.example.ui.screens.M4bBuilderScreen
-@@ -80,9 +88,9 @@ import com.example.ui.screens.PasteAndSpeakScreen
+@@ -80,9 +87,9 @@ import com.example.ui.screens.PasteAndSpeakScreen
  import com.example.ui.screens.ReaderScreen
  import com.example.ui.screens.SettingsScreen
  import com.example.ui.screens.SpeakingTextProcessScreen
@@ -101,7 +100,7 @@ index a333dfe..34aa3b4 100644
  
  object Routes {
      const val LIBRARY = "library"
-@@ -91,10 +99,13 @@ object Routes {
+@@ -91,10 +98,13 @@ object Routes {
      const val PASTE_SPEAK = "paste_speak"
      const val FOLDERS = "folders"
      const val SETTINGS = "settings"
@@ -115,7 +114,7 @@ index a333dfe..34aa3b4 100644
      fun readerRoute(bookId: Long): String = "reader/$bookId"
      fun m4bPlayerRoute(audiobookId: Long): String = "m4b_player/$audiobookId"
      fun pronunciationRulesRoute(bookId: Long = -1L): String = "pronunciation_rules?bookId=$bookId"
-@@ -109,7 +120,7 @@ data class OverlayDeepLinkRequest(
+@@ -109,7 +119,7 @@ data class OverlayDeepLinkRequest(
      val timestamp: Long = System.currentTimeMillis()
  )
  
@@ -124,7 +123,7 @@ index a333dfe..34aa3b4 100644
      val route: String,
      val labelRes: Int,
      val selectedIcon: ImageVector,
-@@ -117,51 +128,62 @@ private data class DrawerDestination(
+@@ -117,51 +127,62 @@ private data class DrawerDestination(
      val testTag: String
  )
  
@@ -215,7 +214,7 @@ index a333dfe..34aa3b4 100644
  class MainActivity : ComponentActivity() {
      private val deepLinkFlow = MutableStateFlow<OverlayDeepLinkRequest?>(null)
      private var volumeKeyHandler: ((Int) -> Boolean)? = null
-@@ -221,6 +243,7 @@ class MainActivity : ComponentActivity() {
+@@ -221,6 +242,7 @@ class MainActivity : ComponentActivity() {
      }
  }
  
@@ -223,7 +222,7 @@ index a333dfe..34aa3b4 100644
  @Composable
  private fun LexiVoiceAppRoot(
      deepLinkFlow: MutableStateFlow<OverlayDeepLinkRequest?>,
-@@ -229,8 +252,6 @@ private fun LexiVoiceAppRoot(
+@@ -229,8 +251,6 @@ private fun LexiVoiceAppRoot(
  ) {
      val context = LocalContext.current
      val navController = rememberNavController()
@@ -232,7 +231,7 @@ index a333dfe..34aa3b4 100644
  
      val libraryViewModel: LibraryViewModel = viewModel()
      val readerViewModel: ReaderViewModel = viewModel()
-@@ -239,6 +260,40 @@ private fun LexiVoiceAppRoot(
+@@ -239,6 +259,40 @@ private fun LexiVoiceAppRoot(
      val pendingDeepLink by deepLinkFlow.collectAsStateWithLifecycle()
      var forceReadAlongTrigger by remember { mutableLongStateOf(0L) }
  
@@ -273,7 +272,7 @@ index a333dfe..34aa3b4 100644
      // An .epub opened from a file manager or a share sheet arrives as a VIEW
      // intent. Import it into the library and go straight into the reader.
      LaunchedEffect(Unit) {
-@@ -281,7 +336,6 @@ private fun LexiVoiceAppRoot(
+@@ -281,7 +335,6 @@ private fun LexiVoiceAppRoot(
          chapterIndex: Int,
          sentenceIndex: Int
      ) {
@@ -281,7 +280,7 @@ index a333dfe..34aa3b4 100644
          when (source) {
              UnifiedOverlaySource.AUDIOBOOK -> {
                  if (audiobookId > 0L) {
-@@ -325,10 +379,9 @@ private fun LexiVoiceAppRoot(
+@@ -325,10 +378,9 @@ private fun LexiVoiceAppRoot(
  
      val backStackEntry by navController.currentBackStackEntryAsState()
      val currentRoute = backStackEntry?.destination?.route
@@ -293,7 +292,7 @@ index a333dfe..34aa3b4 100644
          navController.navigate(route) {
              popUpTo(navController.graph.findStartDestination().id) {
                  saveState = true
-@@ -338,51 +391,28 @@ private fun LexiVoiceAppRoot(
+@@ -338,51 +390,28 @@ private fun LexiVoiceAppRoot(
          }
      }
  
@@ -365,7 +364,7 @@ index a333dfe..34aa3b4 100644
              NavHost(
                  navController = navController,
                  startDestination = Routes.LIBRARY,
-@@ -391,7 +421,7 @@ private fun LexiVoiceAppRoot(
+@@ -391,7 +420,7 @@ private fun LexiVoiceAppRoot(
                  composable(Routes.LIBRARY) {
                      LibraryScreen(
                          viewModel = libraryViewModel,
@@ -374,7 +373,7 @@ index a333dfe..34aa3b4 100644
                          onOpenBook = { bookId ->
                              navController.navigate(Routes.readerRoute(bookId))
                          },
-@@ -402,17 +432,30 @@ private fun LexiVoiceAppRoot(
+@@ -402,17 +431,30 @@ private fun LexiVoiceAppRoot(
                  composable(Routes.AUDIOBOOKS) {
                      AudiobooksScreen(
                          viewModel = audiobooksViewModel,
@@ -407,7 +406,7 @@ index a333dfe..34aa3b4 100644
                          onOpenPlayer = { audiobookId ->
                              navController.navigate(Routes.m4bPlayerRoute(audiobookId))
                          }
-@@ -420,20 +463,20 @@ private fun LexiVoiceAppRoot(
+@@ -420,20 +462,20 @@ private fun LexiVoiceAppRoot(
                  }
  
                  composable(Routes.PASTE_SPEAK) {
@@ -431,7 +430,7 @@ index a333dfe..34aa3b4 100644
                          onOpenPronunciationRules = {
                              navController.navigate(Routes.pronunciationRulesRoute()) {
                                  launchSingleTop = true
-@@ -442,6 +485,43 @@ private fun LexiVoiceAppRoot(
+@@ -442,6 +484,43 @@ private fun LexiVoiceAppRoot(
                      )
                  }
  
@@ -475,7 +474,7 @@ index a333dfe..34aa3b4 100644
                  composable(
                      route = Routes.PRONUNCIATION_RULES,
                      arguments = listOf(
-@@ -509,4 +589,116 @@ private fun LexiVoiceAppRoot(
+@@ -509,4 +588,116 @@ private fun LexiVoiceAppRoot(
              )
          }
      }
