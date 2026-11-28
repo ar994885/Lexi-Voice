@@ -1,0 +1,107 @@
+name: Build Test APKs (artifact only)
+
+# Test builds for device testing. Deliberately separate from build-apk.yml:
+#
+#   build-apk.yml       manual only, publishes a GitHub Release and a tag
+#   build-test-apk.yml  every branch push, signs both editions, keeps the APKs as
+#                       workflow artifacts and never tags or publishes anything
+#
+# The signing, the Gradle invocation and the versionCode formula are copied from
+# the release workflow on purpose, so a test APK installs over a release APK and
+# vice versa (same signing key, strictly increasing versionCode). What is left out
+# is lintVital, which the release workflow runs as a pre-publish gate — this
+# workflow only needs to answer "does it compile".
+
+on:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+
+# Read-only: this workflow has no business writing to the repository.
+permissions:
+  contents: read
+
+env:
+  VERSION_NAME: '0.0.6'
+
+# A new push to the same branch cancels the build still running for the old one.
+concurrency:
+  group: test-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '9.3.1'
+
+      # Same formula as the release workflow: GITHUB_RUN_NUMBER is monotonic per
+      # repository, so a test build never sits below a build already on the
+      # device, and a later release is always installable over it.
+      - name: Compute version
+        id: ver
+        run: |
+          echo "code=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Building test versionName=${VERSION_NAME} versionCode=$((100 + GITHUB_RUN_NUMBER)) from ${GITHUB_REF_NAME}"
+
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
+
+      - name: Build Signed APKs (both editions)
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/release.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          gradle assembleStandardRelease assembleProRelease \
+            -Plexivoice.versionCode=${{ steps.ver.outputs.code }} \
+            -Plexivoice.versionName=${{ steps.ver.outputs.name }}
+
+      # The branch name is in the filename so two test APKs sitting in the
+      # Downloads folder are never mistaken for each other.
+      - name: Rename APKs
+        run: |
+          cp app/build/outputs/apk/standard/release/app-standard-release.apk \
+             "LexiVoice-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}-${GITHUB_REF_NAME}.apk"
+          cp app/build/outputs/apk/pro/release/app-pro-release.apk \
+             "LexiVoice-Pro-v${{ steps.ver.outputs.name }}-${{ steps.ver.outputs.code }}-${GITHUB_REF_NAME}.apk"
+          ls -lh LexiVoice*.apk
+
+      - name: Upload APKs as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LexiVoice-test-${{ steps.ver.outputs.code }}-${{ github.ref_name }}
+          path: LexiVoice*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          {
+            echo "### Test build \`${{ github.ref_name }}\`"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| versionName | ${{ steps.ver.outputs.name }} |"
+            echo "| versionCode | ${{ steps.ver.outputs.code }} |"
+            echo "| Release published | no |"
+            echo ""
+            echo "Download from the **Artifacts** section of this run. Both APKs are"
+            echo "signed with the release key, so they install over an installed"
+            echo "LexiVoice or LexiVoice Pro build."
+          } >> "$GITHUB_STEP_SUMMARY"
