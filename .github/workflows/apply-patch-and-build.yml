@@ -1,0 +1,218 @@
+name: Apply patch and build test APKs
+
+# Applies a .patch file from the repository to a base branch, builds both signed
+# editions, keeps the APKs as workflow artifacts, and (by default) pushes the
+# applied result to a test branch so the next patch has something to sit on.
+#
+# It never publishes a release and never tags: publishing stays manual in
+# build-apk.yml.
+#
+# Use it like this:
+#   1. Upload the patch once, e.g. patches/phase-1.patch (Add file -> Upload files).
+#   2. Actions -> "Apply patch and build test APKs" -> Run workflow.
+#   3. Download the APK from the run's Artifacts section.
+#
+# Patches stack: phase 2 is a diff against the phase-1 result, so either point
+# `base` at the branch this run created, or merge that branch into main first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      patch:
+        description: 'Path to the .patch file in the repository'
+        required: true
+        default: 'patches/phase-1.patch'
+        type: string
+      base:
+        description: 'Branch to apply the patch onto'
+        required: true
+        default: 'main'
+        type: string
+      branch:
+        description: 'Branch to push the applied result to'
+        required: true
+        default: 'ux/phase-1'
+        type: string
+      push:
+        description: 'Push the applied result to that branch'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-patch-${{ inputs.branch }}
+  cancel-in-progress: true
+
+env:
+  VERSION_NAME: '0.0.6'
+
+jobs:
+  apply-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.base }}
+          # Full history so the patch's index lines resolve and the commit we
+          # create has a normal parent.
+          fetch-depth: 0
+
+      - name: Locate patch
+        env:
+          PATCH: ${{ inputs.patch }}
+        run: |
+          if [ ! -f "$PATCH" ]; then
+            echo "::error::No file at '$PATCH'. Upload it to the repository first (Add file -> Upload files), then run this workflow again."
+            exit 1
+          fi
+          echo "PATCH_NAME=$(basename "$PATCH" .patch)" >> "$GITHUB_ENV"
+          echo "Patch: $PATCH"
+          echo "Base:  ${{ inputs.base }} at $(git rev-parse --short HEAD)"
+
+      - name: Inspect patch
+        env:
+          PATCH: ${{ inputs.patch }}
+        run: |
+          git apply --stat "$PATCH" | tee patch-stat.txt
+          {
+            echo "### Patch contents"
+            echo ""
+            echo '```'
+            cat patch-stat.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fail here, loudly and before the build, if the patch does not fit the base.
+      # The usual cause is a patch written against a branch this one is not based on.
+      - name: Check the patch applies
+        env:
+          PATCH: ${{ inputs.patch }}
+        run: |
+          if git apply --check "$PATCH"; then
+            echo "Patch applies cleanly."
+          else
+            echo "::error::'$PATCH' does not apply to '${{ inputs.base }}'. Either point 'base' at the branch the patch was written against, or regenerate the patch against this base."
+            {
+              echo "### Patch does not apply"
+              echo ""
+              echo "It was written against a different tree than \`${{ inputs.base }}\`. Files it touches:"
+              echo '```'
+              git apply --numstat "$PATCH" || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Apply patch
+        env:
+          PATCH: ${{ inputs.patch }}
+          TARGET: ${{ inputs.branch }}
+        run: |
+          git checkout -B "$TARGET"
+          git apply --index --whitespace=nowarn "$PATCH"
+          git status --short
+
+      - name: Commit and push the applied result
+        if: ${{ inputs.push == 'true' }}
+        env:
+          TARGET: ${{ inputs.branch }}
+        run: |
+          if [ "$TARGET" = "main" ] || [ "$TARGET" = "master" ]; then
+            echo "::error::Refusing to push to '$TARGET'. Use a test branch; merge it by hand when the phase is signed off."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --cached --quiet; then
+            echo "Nothing staged: the patch made no changes. Skipping the commit."
+            exit 0
+          fi
+          # [skip ci] so this push does not start a second build of the same tree.
+          git commit -m "Apply ${PATCH_NAME} on ${TARGET} [skip ci]"
+          # The branch is disposable and rebuilt from a patch on every run, so it
+          # is replaced rather than merged into.
+          git push --force origin "HEAD:refs/heads/${TARGET}"
+          echo "Pushed to ${TARGET} at $(git rev-parse --short HEAD)"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '9.3.1'
+
+      # Same formula as build-apk.yml, so a test build never sits below a build
+      # already installed on the device and never blocks a later release.
+      - name: Compute version
+        id: ver
+        run: |
+          echo "code=$((100 + GITHUB_RUN_NUMBER))" >> "$GITHUB_OUTPUT"
+          echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
+
+      - name: Build Signed APKs (both editions)
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/release.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          gradle assembleStandardRelease assembleProRelease \
+            -Plexivoice.versionCode=${{ steps.ver.outputs.code }} \
+            -Plexivoice.versionName=${{ steps.ver.outputs.name }}
+
+      - name: Rename APKs
+        run: |
+          cp app/build/outputs/apk/standard/release/app-standard-release.apk \
+             "LexiVoice-${PATCH_NAME}-${{ steps.ver.outputs.code }}.apk"
+          cp app/build/outputs/apk/pro/release/app-pro-release.apk \
+             "LexiVoice-Pro-${PATCH_NAME}-${{ steps.ver.outputs.code }}.apk"
+          ls -lh LexiVoice*.apk
+
+      - name: Upload APKs as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LexiVoice-test-${{ steps.ver.outputs.code }}
+          path: LexiVoice*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Summary
+        env:
+          PATCH: ${{ inputs.patch }}
+          TARGET: ${{ inputs.branch }}
+          PUSHED: ${{ inputs.push }}
+        run: |
+          if [ "$PUSHED" = "true" ]; then
+            BRANCH_LINE="\`${TARGET}\`"
+          else
+            BRANCH_LINE="not pushed"
+          fi
+          {
+            echo "### Applied \`${PATCH}\`"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Base | \`${{ inputs.base }}\` |"
+            echo "| Result branch | ${BRANCH_LINE} |"
+            echo "| Commit | \`$(git rev-parse --short HEAD)\` |"
+            echo "| versionName | ${{ steps.ver.outputs.name }} |"
+            echo "| versionCode | ${{ steps.ver.outputs.code }} |"
+            echo "| Release published | no |"
+            echo ""
+            echo "Download from the **Artifacts** section of this run. Both APKs are signed"
+            echo "with the release key, so they install over an installed LexiVoice or"
+            echo "LexiVoice Pro build."
+          } >> "$GITHUB_STEP_SUMMARY"
