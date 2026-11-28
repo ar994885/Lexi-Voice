@@ -19,6 +19,7 @@ import com.example.library.FolderSyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -86,6 +87,13 @@ class LibraryViewModel(application: Application) : AndroidViewModel(application)
 
     val folders: StateFlow<List<WatchedFolderEntity>> = libraryRepo.folders
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Phase 1 — S4 reads one book by id. Read-only addition: it forwards the repository
+     * flow that already exists (LibraryRepository.observeBook) and changes no existing
+     * member, key or signature.
+     */
+    fun observeBook(bookId: Long): Flow<BookEntity?> = libraryRepo.observeBook(bookId)
 
     /** Audiobooks, so the folders screen can show how many each folder produced. */
     val audiobooks: StateFlow<List<AudiobookEntity>> = app.database.audiobookDao()
