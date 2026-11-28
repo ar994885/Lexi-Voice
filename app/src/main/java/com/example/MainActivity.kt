@@ -6,53 +6,58 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.calculateBottomPadding
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
-import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.Build
-import androidx.compose.material.icons.outlined.ContentPaste
-import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.NavigationDrawerItemDefaults
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,6 +69,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.data.db.BookEntity
+import com.example.export.ExportChaptersActivity
 import com.example.overlay.FloatingOverlayController
 import com.example.overlay.UnifiedOverlaySource
 import com.example.tts.TtsPlaybackService
@@ -72,6 +79,7 @@ import com.example.ui.LibraryViewModel
 import com.example.ui.ReaderViewModel
 import com.example.ui.components.InAppFloatingTtsPopup
 import com.example.ui.screens.AudiobooksScreen
+import com.example.ui.screens.BookScreen
 import com.example.ui.screens.FoldersAndPermissionsScreen
 import com.example.ui.screens.LibraryScreen
 import com.example.ui.screens.M4bBuilderScreen
@@ -80,9 +88,9 @@ import com.example.ui.screens.PasteAndSpeakScreen
 import com.example.ui.screens.ReaderScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SpeakingTextProcessScreen
+import com.example.ui.screens.StudioScreen
 import com.example.ui.theme.LexiVoiceTheme
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
 
 object Routes {
     const val LIBRARY = "library"
@@ -91,10 +99,13 @@ object Routes {
     const val PASTE_SPEAK = "paste_speak"
     const val FOLDERS = "folders"
     const val SETTINGS = "settings"
+    const val STUDIO = "studio"
+    const val BOOK = "book/{bookId}"
     const val READER = "reader/{bookId}"
     const val M4B_PLAYER = "m4b_player/{audiobookId}"
     const val PRONUNCIATION_RULES = "pronunciation_rules?bookId={bookId}"
 
+    fun bookRoute(bookId: Long): String = "book/$bookId"
     fun readerRoute(bookId: Long): String = "reader/$bookId"
     fun m4bPlayerRoute(audiobookId: Long): String = "m4b_player/$audiobookId"
     fun pronunciationRulesRoute(bookId: Long = -1L): String = "pronunciation_rules?bookId=$bookId"
@@ -109,7 +120,7 @@ data class OverlayDeepLinkRequest(
     val timestamp: Long = System.currentTimeMillis()
 )
 
-private data class DrawerDestination(
+private data class BarDestination(
     val route: String,
     val labelRes: Int,
     val selectedIcon: ImageVector,
@@ -117,50 +128,61 @@ private data class DrawerDestination(
     val testTag: String
 )
 
-private val DRAWER_ITEMS = listOf(
-    DrawerDestination(
+/** The four destinations of section 5.1, in order. */
+private val BAR_ITEMS = listOf(
+    BarDestination(
         route = Routes.LIBRARY,
         labelRes = R.string.tab_library,
         selectedIcon = Icons.AutoMirrored.Filled.MenuBook,
         unselectedIcon = Icons.AutoMirrored.Outlined.MenuBook,
-        testTag = "drawer_item_library"
+        testTag = "tab_library"
     ),
-    DrawerDestination(
+    BarDestination(
         route = Routes.AUDIOBOOKS,
-        labelRes = R.string.tab_audiobooks,
+        labelRes = R.string.tab_listen,
         selectedIcon = Icons.Filled.Headphones,
         unselectedIcon = Icons.Outlined.Headphones,
-        testTag = "drawer_item_audiobooks"
+        testTag = "tab_listen"
     ),
-    DrawerDestination(
-        route = Routes.M4B_BUILDER,
-        labelRes = R.string.tab_m4b_builder,
-        selectedIcon = Icons.Filled.Build,
-        unselectedIcon = Icons.Outlined.Build,
-        testTag = "drawer_item_m4b_builder"
+    BarDestination(
+        route = Routes.STUDIO,
+        labelRes = R.string.tab_studio,
+        selectedIcon = Icons.Filled.AutoAwesome,
+        unselectedIcon = Icons.Outlined.AutoAwesome,
+        testTag = "tab_studio"
     ),
-    DrawerDestination(
-        route = Routes.PASTE_SPEAK,
-        labelRes = R.string.tab_paste_speak,
-        selectedIcon = Icons.Filled.ContentPaste,
-        unselectedIcon = Icons.Outlined.ContentPaste,
-        testTag = "drawer_item_paste_speak"
-    ),
-    DrawerDestination(
-        route = Routes.FOLDERS,
-        labelRes = R.string.tab_folders,
-        selectedIcon = Icons.Filled.Folder,
-        unselectedIcon = Icons.Outlined.Folder,
-        testTag = "drawer_item_folders"
-    ),
-    DrawerDestination(
+    BarDestination(
         route = Routes.SETTINGS,
         labelRes = R.string.tab_settings,
         selectedIcon = Icons.Filled.Settings,
         unselectedIcon = Icons.Outlined.Settings,
-        testTag = "drawer_item_settings"
+        testTag = "tab_settings"
     )
 )
+
+/**
+ * Screens that are not top level, so the bar hides on them: the reader, the player, the
+ * text-rules screen and the Book detail screen (5.3).
+ */
+private val BAR_HIDDEN_ROUTES = setOf(
+    Routes.READER,
+    Routes.M4B_PLAYER,
+    Routes.PRONUNCIATION_RULES,
+    Routes.BOOK
+)
+
+/**
+ * Which bar item is selected for a route. The sub-screens that keep the bar (folders,
+ * Quick Listen, Build from audio) light up the destination they will move under in a
+ * later phase, so the bar never looks like nothing is selected.
+ */
+private fun selectedTabFor(route: String?): String? = when (route) {
+    Routes.LIBRARY, Routes.FOLDERS -> Routes.LIBRARY
+    Routes.AUDIOBOOKS, Routes.PASTE_SPEAK -> Routes.AUDIOBOOKS
+    Routes.STUDIO, Routes.M4B_BUILDER -> Routes.STUDIO
+    Routes.SETTINGS -> Routes.SETTINGS
+    else -> null
+}
 
 class MainActivity : ComponentActivity() {
     private val deepLinkFlow = MutableStateFlow<OverlayDeepLinkRequest?>(null)
@@ -221,6 +243,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LexiVoiceAppRoot(
     deepLinkFlow: MutableStateFlow<OverlayDeepLinkRequest?>,
@@ -229,8 +252,6 @@ private fun LexiVoiceAppRoot(
 ) {
     val context = LocalContext.current
     val navController = rememberNavController()
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
 
     val libraryViewModel: LibraryViewModel = viewModel()
     val readerViewModel: ReaderViewModel = viewModel()
@@ -238,6 +259,40 @@ private fun LexiVoiceAppRoot(
     val overlayState by FloatingOverlayController.state.collectAsStateWithLifecycle()
     val pendingDeepLink by deepLinkFlow.collectAsStateWithLifecycle()
     var forceReadAlongTrigger by remember { mutableLongStateOf(0L) }
+
+    // Phase 1 keeps the old hamburger on every existing screen alive by pointing it at a
+    // small sheet, because the drawer is gone and Quick Listen and Book folders have no
+    // other entry point until Phase 6C and Phase 2 give them one. Deleting this sheet is
+    // the last step of those phases.
+    var showMoreSheet by remember { mutableStateOf(false) }
+    val moreSheetState = rememberModalBottomSheetState()
+
+    // The Studio tiles need a book. Until Phase 5 builds S12 step 1, they pick one from
+    // this list and open the Book screen.
+    val recentBooks by libraryViewModel.recentBooks.collectAsStateWithLifecycle()
+    val libraryBooks by libraryViewModel.libraryBooks.collectAsStateWithLifecycle()
+    val studioBooks = remember(recentBooks, libraryBooks) {
+        (recentBooks + libraryBooks).distinctBy { it.id }
+    }
+
+    var pendingExportBook by remember { mutableStateOf<BookEntity?>(null) }
+    val exportEditedEpubLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/epub+zip")
+    ) { uri ->
+        val target = pendingExportBook
+        pendingExportBook = null
+        if (uri != null && target != null) {
+            libraryViewModel.exportEditedEpubForBook(target, uri) { result ->
+                Toast.makeText(
+                    context,
+                    context.getString(
+                        if (result.success) R.string.book_export_done else R.string.book_export_failed
+                    ),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
 
     // An .epub opened from a file manager or a share sheet arrives as a VIEW
     // intent. Import it into the library and go straight into the reader.
@@ -281,7 +336,6 @@ private fun LexiVoiceAppRoot(
         chapterIndex: Int,
         sentenceIndex: Int
     ) {
-        scope.launch { drawerState.close() }
         when (source) {
             UnifiedOverlaySource.AUDIOBOOK -> {
                 if (audiobookId > 0L) {
@@ -325,10 +379,9 @@ private fun LexiVoiceAppRoot(
 
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
-    val isTopLevelScreen = currentRoute in DRAWER_ITEMS.map { it.route }
+    val showBottomBar = currentRoute == null || currentRoute !in BAR_HIDDEN_ROUTES
 
     fun navigateTopLevel(route: String) {
-        scope.launch { drawerState.close() }
         navController.navigate(route) {
             popUpTo(navController.graph.findStartDestination().id) {
                 saveState = true
@@ -338,51 +391,28 @@ private fun LexiVoiceAppRoot(
         }
     }
 
-    val openDrawerAction: () -> Unit = {
-        scope.launch { drawerState.open() }
-    }
+    // Every existing screen still takes an onOpenDrawer callback. Until the phase that
+    // restyles its top bar, that callback opens the temporary More sheet.
+    val openMoreAction: () -> Unit = { showMoreSheet = true }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        gesturesEnabled = isTopLevelScreen,
-        drawerContent = {
-            ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
-                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 22.dp)) {
-                    Text(
-                        text = "LexiVoice",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "EPUB Reader, TTS & M4B Studio",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                HorizontalDivider(modifier = Modifier.padding(bottom = 8.dp))
-
-                DRAWER_ITEMS.forEach { item ->
-                    val selected = currentRoute == item.route
-                    NavigationDrawerItem(
-                        label = { Text(stringResource(item.labelRes)) },
-                        selected = selected,
-                        onClick = { navigateTopLevel(item.route) },
-                        icon = {
-                            Icon(
-                                imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
-                                contentDescription = null
-                            )
-                        },
-                        modifier = Modifier
-                            .padding(NavigationDrawerItemDefaults.ItemPadding)
-                            .testTag(item.testTag)
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        bottomBar = {
+            if (showBottomBar) {
+                LexiBottomBar(
+                    currentRoute = currentRoute,
+                    onSelect = { route -> navigateTopLevel(route) }
+                )
             }
         }
-    ) {
-        Box(modifier = Modifier.fillMaxSize()) {
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = innerPadding.calculateBottomPadding())
+        ) {
             NavHost(
                 navController = navController,
                 startDestination = Routes.LIBRARY,
@@ -391,7 +421,7 @@ private fun LexiVoiceAppRoot(
                 composable(Routes.LIBRARY) {
                     LibraryScreen(
                         viewModel = libraryViewModel,
-                        onOpenDrawer = openDrawerAction,
+                        onOpenDrawer = openMoreAction,
                         onOpenBook = { bookId ->
                             navController.navigate(Routes.readerRoute(bookId))
                         },
@@ -402,17 +432,30 @@ private fun LexiVoiceAppRoot(
                 composable(Routes.AUDIOBOOKS) {
                     AudiobooksScreen(
                         viewModel = audiobooksViewModel,
-                        onOpenDrawer = openDrawerAction,
+                        onOpenDrawer = openMoreAction,
                         onOpenPlayer = { audiobookId ->
                             navController.navigate(Routes.m4bPlayerRoute(audiobookId))
                         }
                     )
                 }
 
+                composable(Routes.STUDIO) {
+                    StudioScreen(
+                        books = studioBooks,
+                        onOpenBook = { bookId ->
+                            navController.navigate(Routes.bookRoute(bookId)) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onBuildFromAudio = { navigateTopLevel(Routes.M4B_BUILDER) },
+                        onOpenLibrary = { navigateTopLevel(Routes.LIBRARY) }
+                    )
+                }
+
                 composable(Routes.M4B_BUILDER) {
                     M4bBuilderScreen(
                         viewModel = audiobooksViewModel,
-                        onOpenDrawer = openDrawerAction,
+                        onOpenDrawer = openMoreAction,
                         onOpenPlayer = { audiobookId ->
                             navController.navigate(Routes.m4bPlayerRoute(audiobookId))
                         }
@@ -420,24 +463,61 @@ private fun LexiVoiceAppRoot(
                 }
 
                 composable(Routes.PASTE_SPEAK) {
-                    PasteAndSpeakScreen(onOpenDrawer = openDrawerAction)
+                    PasteAndSpeakScreen(onOpenDrawer = openMoreAction)
                 }
 
                 composable(Routes.FOLDERS) {
                     FoldersAndPermissionsScreen(
                         viewModel = libraryViewModel,
-                        onOpenDrawer = openDrawerAction,
+                        onOpenDrawer = openMoreAction,
                         onNavigateToSettings = { navigateTopLevel(Routes.SETTINGS) }
                     )
                 }
 
                 composable(Routes.SETTINGS) {
                     SettingsScreen(
-                        onOpenDrawer = openDrawerAction,
+                        onOpenDrawer = openMoreAction,
                         onOpenPronunciationRules = {
                             navController.navigate(Routes.pronunciationRulesRoute()) {
                                 launchSingleTop = true
                             }
+                        }
+                    )
+                }
+
+                composable(
+                    route = Routes.BOOK,
+                    arguments = listOf(navArgument("bookId") { type = NavType.LongType })
+                ) { entry ->
+                    val bookId = entry.arguments?.getLong("bookId") ?: -1L
+                    BookScreen(
+                        bookId = bookId,
+                        viewModel = libraryViewModel,
+                        onBack = { navController.popBackStack() },
+                        onOpenReader = { id ->
+                            navController.navigate(Routes.readerRoute(id)) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onOpenAudiobook = { id ->
+                            forceReadAlongTrigger = System.currentTimeMillis()
+                            navController.navigate(Routes.m4bPlayerRoute(id)) {
+                                launchSingleTop = true
+                            }
+                        },
+                        onCreateAudiobook = { book ->
+                            ExportChaptersActivity.launchForBook(
+                                context = context,
+                                title = book.title,
+                                author = book.author,
+                                fileKey = book.fileKey,
+                                isDirectPath = book.isDirectPath,
+                                coverPath = book.coverPath
+                            )
+                        },
+                        onExportEditedBook = { book ->
+                            pendingExportBook = book
+                            exportEditedEpubLauncher.launch("${book.title} (Edited).epub")
                         }
                     )
                 }
@@ -508,5 +588,117 @@ private fun LexiVoiceAppRoot(
                 }
             )
         }
+    }
+
+    if (showMoreSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showMoreSheet = false },
+            sheetState = moreSheetState
+        ) {
+            MoreSheet(
+                onQuickListen = {
+                    showMoreSheet = false
+                    navigateTopLevel(Routes.PASTE_SPEAK)
+                },
+                onBookFolders = {
+                    showMoreSheet = false
+                    navigateTopLevel(Routes.FOLDERS)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun LexiBottomBar(
+    currentRoute: String?,
+    onSelect: (String) -> Unit
+) {
+    val selectedTab = selectedTabFor(currentRoute)
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+        BAR_ITEMS.forEach { item ->
+            val selected = selectedTab == item.route
+            NavigationBarItem(
+                selected = selected,
+                onClick = { onSelect(item.route) },
+                icon = {
+                    Icon(
+                        imageVector = if (selected) item.selectedIcon else item.unselectedIcon,
+                        contentDescription = null
+                    )
+                },
+                label = {
+                    Text(
+                        text = stringResource(item.labelRes),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                modifier = Modifier.testTag(item.testTag)
+            )
+        }
+    }
+}
+
+/**
+ * Temporary surface, deleted once Quick Listen moves under Listen (Phase 6C) and Book
+ * folders moves under Library (Phase 2). It exists so that removing the drawer does not
+ * orphan two working screens in the meantime.
+ */
+@Composable
+private fun MoreSheet(
+    onQuickListen: () -> Unit,
+    onBookFolders: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 24.dp)
+            .testTag("legacy_more_sheet")
+    ) {
+        Text(
+            text = stringResource(R.string.more_sheet_title),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        MoreSheetRow(
+            icon = Icons.Filled.ContentPaste,
+            label = stringResource(R.string.more_quick_listen),
+            onClick = onQuickListen
+        )
+        MoreSheetRow(
+            icon = Icons.Filled.Folder,
+            label = stringResource(R.string.more_book_folders),
+            onClick = onBookFolders
+        )
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun MoreSheetRow(
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.width(16.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface
+        )
     }
 }
